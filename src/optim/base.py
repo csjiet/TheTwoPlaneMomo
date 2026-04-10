@@ -171,6 +171,9 @@ def train(
             # Save checkpoints and evaluate at final iteration, but no need to train further
             break
 
+        # MODIFIED
+        loss_for_momo = torch.tensor(0.0, device=cfg.device) 
+
         # Train model
         t_start = time.perf_counter_ns()
         for microstep_idx in range(cfg.acc_steps):  # gradient accumulation
@@ -187,6 +190,9 @@ def train(
             loss.backward()
             substep += 1
 
+            # MODIFIED
+            loss_for_momo += loss.detach()
+
         if cfg.grad_clip != 0.0:
             if isinstance(model, torch.nn.parallel.DistributedDataParallel):
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -200,11 +206,22 @@ def train(
 
         if cfg.opt == "sf-sgd" or cfg.opt == "sf-adamw":
             opt.train()
-        (
+        # (
+        #     opt.step()
+        #     if cfg.opt != "sophiag"
+        #     else opt.step(bs=cfg.sophia_bs * cfg.sequence_length)
+        # )
+
+        # MODIFIED:
+        wandb_optimizer_logs = {}
+
+        if cfg.opt == "sophiag":
+            opt.step(bs=cfg.sophia_bs * cfg.sequence_length)
+        elif cfg.opt == "gen_two_plane_momo":
+            opt.step(loss_for_momo, wandb_optimizer_logs)
+        else:
             opt.step()
-            if cfg.opt != "sophiag"
-            else opt.step(bs=cfg.sophia_bs * cfg.sequence_length)
-        )
+
         if cfg.scheduler != "none":
             scheduler.step()
         if cfg.opt == "sophiag":
@@ -278,6 +295,8 @@ def train(
                     ),
                     **train_aux_losses,
                 }
+
+                wandb_logs = wandb_logs | wandb_optimizer_logs # merge dictionaries
 
                 if cfg.opt == "prodigy":
                     wandb_logs["effective_lr"] = prodigy_efective_lrs[0]

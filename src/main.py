@@ -31,6 +31,7 @@ from optim.sign import Signum
 from optim.soap import SOAP
 from optim.sophia import SophiaG
 
+from optim.gen_two_plane_momo import GenTwoPlaneMoMo
 
 def get_args():
     parser = argparse.ArgumentParser(allow_abbrev=False)
@@ -78,6 +79,20 @@ def main(args, parser):
         wandb.define_metric("train/*", step_metric="iter")
         wandb.define_metric("val/*", step_metric="iter")
         wandb.define_metric("lr", step_metric="iter")
+
+        wandb.define_metric("tokens", step_metric="iter")
+        wandb.define_metric("mean_grad_norm", step_metric="iter")
+        wandb.define_metric("max_grad_norm", step_metric="iter")
+        wandb.define_metric("iter_dt", step_metric="iter")
+        wandb.define_metric("parameters", step_metric="iter")
+        wandb.define_metric("optimized_parameters", step_metric="iter")
+        wandb.define_metric("non_embedding_parameters", step_metric="iter")
+
+        # if args.opt == "two_plane_momo":
+        #     wandb.define_metric("two_plane_momo/*", step_metric="iter")
+        if args.opt in ("gen_two_plane_momo", "two_plane_momo"):
+            wandb.define_metric("two_plane_momo/*", step_metric="iter")
+
 
     print(f"Starting Experiment: {exp_name}")
     print(f"Experiment Directory: {exp_dir}")
@@ -194,6 +209,22 @@ def main(args, parser):
             beta3_warmup=args.adema_beta3_warmup,
             alpha_warmup=args.adema_alpha_warmup,
             weight_decay=args.weight_decay,
+        )
+    elif args.opt == "gen_two_plane_momo":
+        opt = GenTwoPlaneMoMo(
+            group_specs,
+            lr=args.lr,
+            beta_short=args.gen_two_plane_momo_beta_short,
+            beta_long=args.gen_two_plane_momo_beta_long,
+            eps=args.gen_two_plane_momo_eps,
+            clip_alpha=args.gen_two_plane_momo_clip_alpha,
+            use_loss_ema=args.gen_two_plane_momo_use_loss_ema,
+            preconditioner=args.gen_two_plane_momo_preconditioner,
+            precond_beta2=args.gen_two_plane_momo_precond_beta2,
+            weight_decay_factor=args.gen_two_plane_momo_weight_decay_factor,
+            eps_precond=args.gen_two_plane_momo_eps_precond,
+            decoupled_weight_decay=args.gen_two_plane_momo_decoupled_weight_decay,
+            alpha_scope=args.gen_two_plane_momo_alpha_scope,
         )
     elif args.opt == "lion":
         opt = Lion(
@@ -492,6 +523,17 @@ def get_exp_name(
         "device",
         "adema_beta3_warmup",
         "adema_alpha_warmup",
+        "gen_two_plane_momo_beta_short", 
+        "gen_two_plane_momo_beta_long", 
+        "gen_two_plane_momo_eps", 
+        "gen_two_plane_momo_clip_alpha", 
+        "gen_two_plane_momo_use_loss_ema",
+        "gen_two_plane_momo_preconditioner", 
+        "gen_two_plane_momo_precond_beta2", 
+        "gen_two_plane_momo_weight_decay_factor", 
+        "gen_two_plane_momo_eps_precond", 
+        "gen_two_plane_momo_decoupled_weight_decay",
+        "gen_two_plane_momo_alpha_scope", 
         "plot_router_logits",
         "weight_average",
         # "wa_interval",

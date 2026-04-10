@@ -1,3 +1,11 @@
+# NFS temp files (created when a deleted file is still open)
+.nfs*
+
+# WandB stuff
+wandb/
+*.wandb
+.wandb/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
