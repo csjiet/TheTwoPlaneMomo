@@ -108,6 +108,22 @@ def main(args, parser):
 
     model = distributed_backend.transform_model(model)
 
+    # ADDED: since we are doing per-parameter alpha1 scope computation and tracking its alpha1, we want to see what each parameter is in the architecture
+    if distributed_backend.is_master_process():
+        print("\n===== PARAMETER INDEX MAP =====", file=sys.stderr)
+        for param_idx, (p_name, p) in enumerate(model.named_parameters()):
+            parent_module = p_name.rsplit(".", 1)[0] if "." in p_name else "<top_level>"
+            local_name = p_name.rsplit(".", 1)[-1]
+            print(f"[param_idx={param_idx}] "
+                f"full_name={p_name} "
+                f"parent_module={parent_module} "
+                f"local_name={local_name} "
+                f"shape={tuple(p.shape)} "
+                f"requires_grad={p.requires_grad}",
+                file=sys.stderr,
+            )
+        print("===== END PARAMETER INDEX MAP =====\n", file=sys.stderr)
+
     group_specs = distributed_backend.get_raw_model(model).get_parameter_group_specs(
         config=args
     )

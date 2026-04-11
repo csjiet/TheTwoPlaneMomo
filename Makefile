@@ -6,7 +6,7 @@
 WANDB_PROJECT     ?= AdEMAMIX_adaptive
 WANDB_RUN_PREFIX  ?= ori_llama
 WANDB_ENTITY			?= tbal
-RUN_TAG      ?= 16k_iter 
+RUN_TAG      ?= expr1_16k_iter
 # tp_momo_per_param_vs_network_wd_0-1
 # EXPERIMENT_NAME ?= test
 # test_lb_clip_new_tp_momo 
