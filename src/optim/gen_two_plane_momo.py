@@ -3,6 +3,12 @@ from typing import Dict, Iterable, Optional, Union
 import torch
 from torch.optim import Optimizer
 
+# AdEMAMix linear scheduler
+def linear_warmup_scheduler(step, alpha_end, alpha_start=0, warmup=1):
+    if step < warmup:
+        a = step / float(warmup)
+        return (1.0 - a) * alpha_start + a * alpha_end
+    return alpha_end
 
 class GenTwoPlaneMoMo(Optimizer):
     """
@@ -19,9 +25,12 @@ class GenTwoPlaneMoMo(Optimizer):
         lr: float = 1e-3,
         beta_short: float = 0.9,  # short-horizon EMA decay for the gradient/ fast timescale
         beta_long: float = 0.999,  # long-horizon EMA decay for the gradient /slow timescale
+        beta_long_start: float = 0.5,
+        beta_long_warmup_steps: Optional[int] = None,
         eps: float = 1e-12,
         clip_alpha: bool = True,
         use_loss_ema: bool = True,
+        alpha_denom_correction: float = 0.0,
         preconditioner: str = "identity",  # string options: {"identity", "adam"}
         precond_beta2: float = 0.999,  # Adam second-moment beta2
         weight_decay_factor: float = 0.0,
@@ -37,6 +46,8 @@ class GenTwoPlaneMoMo(Optimizer):
             raise ValueError("beta_long in [0,1)")
         if eps <= 0:
             raise ValueError("eps must be > 0")
+        if alpha_denom_correction < 0:
+            raise ValueError("alpha_denom_correction must be >= 0")
         if preconditioner not in ("identity", "adam"):
             raise ValueError("preconditioner must be either {'identity', 'adam'}")
         if not (0.0 <= precond_beta2 < 1.0):
@@ -49,11 +60,17 @@ class GenTwoPlaneMoMo(Optimizer):
             raise ValueError("decoupled_weight_decay must be a bool")
         if alpha_scope not in ("network", "parameter"):
             raise ValueError("alpha_scope must be one of {'network', 'parameter'}")
+        if not (0.0 <= beta_long_start < 1.0): # omit the degen no update beta=1 case
+            raise ValueError("beta_long_start in [0,1)")
+        if beta_long_warmup_steps is not None and beta_long_warmup_steps < 1:
+            raise ValueError("beta_long_warmup must be >= 1 or None")
 
         defaults = dict(
             lr=lr,
             beta_short=beta_short,  # short-horizon EMA decay for the gradient
             beta_long=beta_long,  # long-horizon EMA decay for the gradient /slower timescale
+            beta_long_start=beta_long_start,
+            beta_long_warmup_steps=beta_long_warmup_steps,
             eps=eps,
             eps_precond=eps_precond,
             preconditioner=preconditioner,
@@ -63,6 +80,7 @@ class GenTwoPlaneMoMo(Optimizer):
             alpha_scope=alpha_scope,
             tp_clip_alpha=clip_alpha,
             tp_use_loss_ema=use_loss_ema,
+            alpha_denom_correction = alpha_denom_correction,
         )
 
         super().__init__(params, defaults)
@@ -75,6 +93,7 @@ class GenTwoPlaneMoMo(Optimizer):
             g.setdefault("tp_step", 0)
             g.setdefault("tp_clip_alpha", clip_alpha)
             g.setdefault("tp_use_loss_ema", use_loss_ema)
+            g.setdefault("alpha_denom_correction", alpha_denom_correction)
             g.setdefault("preconditioner", preconditioner)
             g.setdefault("precond_beta2", precond_beta2)
             g.setdefault("weight_decay_factor", weight_decay_factor)
@@ -101,6 +120,9 @@ class GenTwoPlaneMoMo(Optimizer):
         mu = self.param_groups[0]["weight_decay_factor"]
         beta_s = self.param_groups[0]["beta_short"]
         beta_l = self.param_groups[0]["beta_long"]
+        beta_l_final = self.param_groups[0]["beta_long"]
+        beta_l_start = self.param_groups[0]["beta_long_start"]
+        beta_l_warmup_steps = self.param_groups[0]["beta_long_warmup_steps"]
         eps = self.param_groups[0]["eps"]
         eps_precond = self.param_groups[0]["eps_precond"]
         precond = self.param_groups[0]["preconditioner"]
@@ -113,7 +135,21 @@ class GenTwoPlaneMoMo(Optimizer):
         gamma2 = g["tp_gamma2"]
         clip_alpha = g["tp_clip_alpha"]
         use_loss_ema = g["tp_use_loss_ema"]
+        alpha_denom_correction = g["alpha_denom_correction"]
         tp_step = g["tp_step"]
+
+        if beta_l_warmup_steps is not None:
+            beta_l = linear_warmup_scheduler(
+                tp_step,
+                alpha_end=beta_l_final,
+                alpha_start=beta_l_start,
+                warmup=beta_l_warmup_steps,
+            )
+        else:
+            beta_l = beta_l_final
+
+        if log_dict is not None:
+            log_dict["two_plane_momo/beta_long_used"] = float(beta_l)
 
         # ensure all parameter groups must share the same optimizer-wide hyperparameters and scalar-state semantics
         # since this implementation computes one network-wide alpha using param_groups[0] as the global owner.
@@ -122,8 +158,12 @@ class GenTwoPlaneMoMo(Optimizer):
                 raise ValueError("All parameter groups must share the same lr for network-wide GenTwoPlaneMoMo.")
             if group["beta_short"] != beta_s:
                 raise ValueError("All parameter groups must share the same beta_short for network-wide GenTwoPlaneMoMo.")
-            if group["beta_long"] != beta_l:
+            if group["beta_long"] != beta_l_final:
                 raise ValueError("All parameter groups must share the same beta_long for network-wide GenTwoPlaneMoMo.")
+            if group["beta_long_start"] != beta_l_start:
+                raise ValueError("All parameter groups must share the same beta_long_start for network-wide GenTwoPlaneMoMo.")
+            if group["beta_long_warmup_steps"] != beta_l_warmup_steps:
+                raise ValueError("All parameter groups must share the same beta_long_warmup_steps for network-wide GenTwoPlaneMoMo.")
             if group["eps"] != eps:
                 raise ValueError("All parameter groups must share the same eps for network-wide GenTwoPlaneMoMo.")
             if group["eps_precond"] != eps_precond:
@@ -140,6 +180,8 @@ class GenTwoPlaneMoMo(Optimizer):
                 raise ValueError("All parameter groups must share the same tp_clip_alpha for network-wide GenTwoPlaneMoMo.")
             if group["tp_use_loss_ema"] != use_loss_ema:
                 raise ValueError("All parameter groups must share the same tp_use_loss_ema for network-wide GenTwoPlaneMoMo.")
+            if group["alpha_denom_correction"] != alpha_denom_correction:
+                raise ValueError("All parameter groups must share the same alpha_denom_correction for network-wide GenTwoPlaneMoMo.")
             if group["alpha_scope"] != "network":
                 raise ValueError("All parameter groups must use alpha_scope='network' for network-wide GenTwoPlaneMoMo.")
             if group["tp_barf1"] != barf1:
@@ -176,6 +218,8 @@ class GenTwoPlaneMoMo(Optimizer):
         logged_mom_vec_1_squared_norm = 0.0
         logged_mom_vec_2_squared_norm = 0.0
         logged_mom_vec1_vec2_dot_prod = 0.0
+        logged_grad_m1_dot_prod = 0.0
+        logged_grad_m2_dot_prod = 0.0
 
         # For: lambda_1,unc
         m1_dot_w_t = 0.0
@@ -235,6 +279,8 @@ class GenTwoPlaneMoMo(Optimizer):
                 logged_mom_vec_1_squared_norm += torch.dot(m1.flatten(), m1.flatten()).item()
                 logged_mom_vec_2_squared_norm += torch.dot(m2.flatten(), m2.flatten()).item()
                 logged_mom_vec1_vec2_dot_prod += torch.dot(m1.flatten(), m2.flatten()).item()
+                logged_grad_m1_dot_prod += torch.dot(grad.flatten(), m1.flatten()).item()
+                logged_grad_m2_dot_prod += torch.dot(grad.flatten(), m2.flatten()).item()
 
                 # For: lambda_1,unc
                 w_t = p.detach().float()
@@ -283,6 +329,15 @@ class GenTwoPlaneMoMo(Optimizer):
             b1 = m1_dot_w_t - gamma1
             b2 = m2_dot_w_t - gamma2
 
+        # wandb logging
+        if log_dict is not None:
+            log_dict["two_plane_momo/network/barf1"] = float(barf1)
+            log_dict["two_plane_momo/network/barf2"] = float(barf2)
+            log_dict["two_plane_momo/network/gamma1"] = float(gamma1)
+            log_dict["two_plane_momo/network/gamma2"] = float(gamma2)
+            log_dict["two_plane_momo/network/b1"] = float(b1)
+            log_dict["two_plane_momo/network/b2"] = float(b2)
+
         # For: lambda_1,unc (2nd term in the numerator: (m1 - m2)^T w_t)
         m1_minus_m2_dot_wt = (m1_dot_w_t - m2_dot_w_t)
 
@@ -293,17 +348,20 @@ class GenTwoPlaneMoMo(Optimizer):
         # Unconstrained lambda_{1,unc}
         # - Denominator:
         #   final_denom = (m_t^{(1)} - m_t^{(2)})^\top  P_t^{-1}  (m_t^{(1)} - m_t^{(2)}).
+        # corrected_denom = max(final_denom, eps) + alpha_denom_correction
         # - Numerator (coupled/proximal-\mu version):
         #   final_numer = ((1 + \eta*\mu)/\eta) * (b_t^{(1)} - b_t^{(2)}) - \mu * (m_t^{(1)} - m_t^{(2)})^\top w_t - (m_t^{(1)} - m_t^{(2)})^\top P_t^{-1} m_t^{(2)}.
         # - Final form:
-        #   lambda_{1,unc} = final_numer / final_denom.
+        #   lambda_{1,unc} = final_numer / corrected_denom.
         final_denom = denom_m1_m2_precond_inv_m1_m2
+        # Adding additive correction term to the alpha denominator 
+        corrected_denom = max(final_denom, eps) + alpha_denom_correction
         alpha1_unc = 0.0
-        if final_denom <= eps:
+        if corrected_denom <= eps:
             alpha1 = alpha_max if b1 >= b2 else alpha_min
             alpha1_unc = 1.0 if b1 >= b2 else 0.0
         else:
-            alpha1_unc = (num_fac * (b1 - b2) - mu_model * m1_minus_m2_dot_wt - numer_m1_m2_precond_inv_m2) / max(final_denom, eps)
+            alpha1_unc = (num_fac * (b1 - b2) - mu_model * m1_minus_m2_dot_wt - numer_m1_m2_precond_inv_m2) / corrected_denom
             alpha1 = alpha1_unc
             if clip_alpha:
                 alpha1 = min(alpha_max, max(alpha_min, alpha1))
@@ -319,6 +377,8 @@ class GenTwoPlaneMoMo(Optimizer):
             log_dict["two_plane_momo/network/||m_t^{(1)}||_{2}^{2}"] = float(logged_mom_vec_1_squared_norm)
             log_dict["two_plane_momo/network/||m_t^{(2)}||_{2}^{2}"] = float(logged_mom_vec_2_squared_norm)
             log_dict["two_plane_momo/network/<m_t^(1), m_t^(2)>"] = float(logged_mom_vec1_vec2_dot_prod)
+            log_dict["two_plane_momo/network/<g_t, m_t^(1)>"] = float(logged_grad_m1_dot_prod)
+            log_dict["two_plane_momo/network/<g_t, m_t^(2)>"] = float(logged_grad_m2_dot_prod)
 
         # apply iterate update w_{t+1}
         # w_{t+1} = (1 / (1 + \eta*\mu)) w_t - (\eta / (1 + \eta*\mu)) P_t^{-1} (\lambda_1 m_t^{(1)} + (1 - \lambda_1) m_t^{(2)})
@@ -384,19 +444,40 @@ class GenTwoPlaneMoMo(Optimizer):
         shared_barf2 = shared_group["tp_barf2"]
         shared_use_loss_ema = shared_group["tp_use_loss_ema"]
 
-        beta_s_global = self.param_groups[0]["beta_short"]
-        beta_l_global = self.param_groups[0]["beta_long"]
+        beta_s_global = shared_group["beta_short"]
+
+        beta_l_final = shared_group["beta_long"]
+        beta_l_start = shared_group["beta_long_start"]
+        beta_l_warmup = shared_group["beta_long_warmup_steps"]
+        global_beta_step = shared_group["tp_step"]
+        shared_alpha_denom_correction = shared_group["alpha_denom_correction"]
+
+        if beta_l_warmup is not None:
+            beta_l_global = linear_warmup_scheduler(
+                global_beta_step,
+                alpha_end=beta_l_final,
+                alpha_start=beta_l_start,
+                warmup=beta_l_warmup,
+            )
+        else:
+            beta_l_global = beta_l_final
 
         # global loss-EMA states 
         for group in self.param_groups[1:]:
             if group["beta_short"] != beta_s_global:
                 raise ValueError("All parameter groups must share the same beta_short when using global loss EMA in parameter mode.")
-            if group["beta_long"] != beta_l_global:
+            if group["beta_long"] != beta_l_final:
                 raise ValueError("All parameter groups must share the same beta_long when using global loss EMA in parameter mode.")
+            if group["beta_long_start"] != beta_l_start:
+                raise ValueError("All parameter groups must share the same beta_long_start when using global loss EMA in parameter mode.")
+            if group["beta_long_warmup_steps"] != beta_l_warmup:
+                raise ValueError("All parameter groups must share the same beta_long_warmup_steps when using global loss EMA in parameter mode.")
             if group["tp_use_loss_ema"] != shared_use_loss_ema:
                 raise ValueError("All parameter groups must share the same tp_use_loss_ema when using global loss EMA in parameter mode.")
             if group["alpha_scope"] != "parameter":
                 raise ValueError("All parameter groups must use alpha_scope='parameter' for parameter-specific GenTwoPlaneMoMo.")
+            if group["alpha_denom_correction"] != shared_alpha_denom_correction:
+                raise ValueError("All parameter groups must share the same shared_alpha_denom_correction for parameter-specific GenTwoPlaneMoMo.")
 
         # update the global loss-EMA state exactly once per optimizer step
         if shared_use_loss_ema:
@@ -410,11 +491,17 @@ class GenTwoPlaneMoMo(Optimizer):
         else:
             loss_t = None
 
+        # wandb logging
+        if log_dict is not None:
+            log_dict["two_plane_momo/beta_long_used"] = float(beta_l_global)
+            log_dict["two_plane_momo/shared_barf1"] = float(shared_barf1)
+            log_dict["two_plane_momo/shared_barf2"] = float(shared_barf2)
+
         for group_idx, group in enumerate(self.param_groups):
             lr = group["lr"]
             mu = group["weight_decay_factor"]
             beta_s = group["beta_short"]
-            beta_l = group["beta_long"]
+            beta_l = beta_l_global 
             eps = group["eps"]
             eps_precond = group["eps_precond"]
             precond = group["preconditioner"]
@@ -422,11 +509,11 @@ class GenTwoPlaneMoMo(Optimizer):
             decoupled_wd = group["decoupled_weight_decay"]
             clip_alpha = group["tp_clip_alpha"]
             use_loss_ema = group["tp_use_loss_ema"]
+            alpha_denom_correction = group["alpha_denom_correction"]
 
             # using the globally defined shared loss-EMA states from MoMo (since there is no notion of a "local" parameter-subset loss)
             barf1 = shared_barf1
             barf2 = shared_barf2
-
 
             lr_safe = max(lr, eps)
             mu_model = 0.0 if decoupled_wd else mu
@@ -485,6 +572,8 @@ class GenTwoPlaneMoMo(Optimizer):
                 logged_mom_vec_1_squared_norm = torch.dot(m1.flatten(), m1.flatten()).item()
                 logged_mom_vec_2_squared_norm = torch.dot(m2.flatten(), m2.flatten()).item()
                 logged_mom_vec1_vec2_dot_prod = torch.dot(m1.flatten(), m2.flatten()).item()
+                logged_grad_m1_dot_prod = torch.dot(grad.flatten(), m1.flatten()).item()
+                logged_grad_m2_dot_prod = torch.dot(grad.flatten(), m2.flatten()).item()
 
                 w_t = p.detach().float()
                 m1_dot_w_t = torch.dot(m1.flatten(), w_t.flatten()).item()
@@ -512,18 +601,27 @@ class GenTwoPlaneMoMo(Optimizer):
                     b1 = m1_dot_w_t - gamma1
                     b2 = m2_dot_w_t - gamma2
 
+                # wandb logging
+                if log_dict is not None:
+                    prefix = f"two_plane_momo/group_{group_idx}/parameter_{param_log_idx}"
+                    log_dict[f"{prefix}/gamma1"] = float(gamma1)
+                    log_dict[f"{prefix}/gamma2"] = float(gamma2)
+                    log_dict[f"{prefix}/b1"] = float(b1)
+                    log_dict[f"{prefix}/b2"] = float(b2)
+
                 # second term in the numerator: (m1 - m2)^T w_t
                 m1_minus_m2_dot_wt = (m1_dot_w_t - m2_dot_w_t)
 
-                alpha_max = 0.9
-                alpha_min = 0.1
+                alpha_max = 1.0
+                alpha_min = 0.0
 
                 alpha1_unc = 0.0
-                if final_denom <= eps:
+                corrected_denom = max(final_denom, eps) + alpha_denom_correction
+                if corrected_denom <= eps:
                     alpha1 = alpha_max if b1 >= b2 else alpha_min
                     alpha1_unc = 1.0 if b1 >= b2 else 0.0
                 else:
-                    alpha1_unc = (num_fac * (b1 - b2) - mu_model * m1_minus_m2_dot_wt - numer_m1_m2_precond_inv_m2) / max(final_denom, eps)
+                    alpha1_unc = (num_fac * (b1 - b2) - mu_model * m1_minus_m2_dot_wt - numer_m1_m2_precond_inv_m2) / corrected_denom
                     alpha1 = alpha1_unc
                     if clip_alpha:
                         alpha1 = min(alpha_max, max(alpha_min, alpha1))
@@ -539,6 +637,8 @@ class GenTwoPlaneMoMo(Optimizer):
                     log_dict[f"{prefix}/||m_t^{(1)}||_{2}^{2}"] = float(logged_mom_vec_1_squared_norm)
                     log_dict[f"{prefix}/||m_t^{(2)}||_{2}^{2}"] = float(logged_mom_vec_2_squared_norm)
                     log_dict[f"{prefix}/<m_t^(1), m_t^(2)>"] = float(logged_mom_vec1_vec2_dot_prod)
+                    log_dict[f"{prefix}/<g_t, m_t^(1)>"] = float(logged_grad_m1_dot_prod)
+                    log_dict[f"{prefix}/<g_t, m_t^(2)>"] = float(logged_grad_m2_dot_prod)
 
                 # convex-combo momentum m = alpha1*m1 + alpha2*m2
                 mom_vec_cvx_combo = alpha1 * m1 + alpha2 * m2
@@ -580,6 +680,11 @@ class GenTwoPlaneMoMo(Optimizer):
         for group in self.param_groups[1:]:
             group["tp_barf1"] = shared_barf1
             group["tp_barf2"] = shared_barf2
+
+        # Since we are using param_groups[0] as the "global owner" of shared loss-EMA, scheduler state, we have to maintain the same global tp_step across all parameter groups for consistentcy and for resume correctness.
+        next_global_step = shared_group["tp_step"] + 1
+        for group in self.param_groups:
+            group["tp_step"] = next_global_step
         return None
 
     # Step function calls either _step_network (network-wide alpha scope computation) or _step_parameter (per-parameter alpha scope computation)

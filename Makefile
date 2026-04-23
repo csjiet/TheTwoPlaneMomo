@@ -6,7 +6,7 @@
 WANDB_PROJECT     ?= AdEMAMIX_adaptive
 WANDB_RUN_PREFIX  ?= ori_llama
 WANDB_ENTITY			?= tbal
-RUN_TAG      ?= expr1_16k_iter
+RUN_TAG      ?= expr1_warmup_16k_iter
 # tp_momo_per_param_vs_network_wd_0-1
 # EXPERIMENT_NAME ?= test
 # test_lb_clip_new_tp_momo 
@@ -174,6 +174,7 @@ g_tp_momo:
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
 		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
+		--gen_two_plane_momo_beta_long_start 0.5 --gen_two_plane_momo_beta_long_warmup_steps 4000\
 		--gen_two_plane_momo_eps 1e-12 \
 		--gen_two_plane_momo_preconditioner adam \
 		--gen_two_plane_momo_precond_beta2 0.999 \
@@ -193,6 +194,7 @@ g_tp_momo2:
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
 		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
+		--gen_two_plane_momo_beta_long_start 0.5 --gen_two_plane_momo_beta_long_warmup_steps 4000\
 		--gen_two_plane_momo_eps 1e-12 \
 		--gen_two_plane_momo_preconditioner adam \
 		--gen_two_plane_momo_precond_beta2 0.999 \
@@ -213,6 +215,7 @@ g_tp_momo_no_loss_ema:
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
 		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
+		--gen_two_plane_momo_beta_long_start 0.5 --gen_two_plane_momo_beta_long_warmup_steps 4000\
 		--gen_two_plane_momo_eps 1e-12 \
 		--gen_two_plane_momo_preconditioner adam \
 		--gen_two_plane_momo_precond_beta2 0.999 \
@@ -233,6 +236,7 @@ g_tp_momo_alpha_per_param:
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
 		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
+		--gen_two_plane_momo_beta_long_start 0.5 --gen_two_plane_momo_beta_long_warmup_steps 4000\
 		--gen_two_plane_momo_eps 1e-12 \
 		--gen_two_plane_momo_preconditioner adam \
 		--gen_two_plane_momo_precond_beta2 0.999 \

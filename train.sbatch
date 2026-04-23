@@ -21,7 +21,7 @@ MAKE_ARGS=("$@")
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate "/scratch/$USER/conda/envs/AMM"
-cd "/scratch/$USER/projects/NewTwoPlaneMomo"
+cd "/scratch/$USER/projects/TheTwoPlaneMomo"
 
 # HF caches on scratch
 export HF_HOME="/scratch/$USER/hf"

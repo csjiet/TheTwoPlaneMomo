@@ -133,10 +133,13 @@ def parse_args(base_parser, args, namespace):
     # MODIFIED
     parser.add_argument("--gen_two_plane_momo_beta_short", default=0.9, type=float)
     parser.add_argument("--gen_two_plane_momo_beta_long", default=0.999, type=float)
+    parser.add_argument( "--gen_two_plane_momo_beta_long_start", default=0.5, type=float)
+    parser.add_argument( "--gen_two_plane_momo_beta_long_warmup_steps", default=None, type=int)
     parser.add_argument("--gen_two_plane_momo_eps", default=1e-12, type=float)
     parser.add_argument("--gen_two_plane_momo_clip_alpha", default=True, type=bool)
     parser.add_argument("--gen_two_plane_momo_use_loss_ema", action="store_true")
     parser.add_argument("--no-gen_two_plane_momo_use_loss_ema", dest="gen_two_plane_momo_use_loss_ema", action="store_false")
+    parser.add_argument("--gen_two_plane_momo_alpha_denom_correction", default=0.0, type=float)
     parser.set_defaults(gen_two_plane_momo_use_loss_ema=True)
     parser.add_argument("--gen_two_plane_momo_preconditioner", default="identity", type=str)
     parser.add_argument("--gen_two_plane_momo_precond_beta2", default=0.999, type=float)
