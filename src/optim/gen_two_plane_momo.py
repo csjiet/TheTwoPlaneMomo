@@ -1,14 +1,21 @@
 from typing import Dict, Iterable, Optional, Union
+import math
 
 import torch
 from torch.optim import Optimizer
 
 # AdEMAMix linear scheduler
-def linear_warmup_scheduler(step, alpha_end, alpha_start=0, warmup=1):
+def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
+    def f(beta, eps=1e-8):
+        return math.log(0.5) / math.log(beta + eps) - 1
+
+    def f_inv(t):
+        return math.pow(0.5, 1 / (t + 1))
+
     if step < warmup:
         a = step / float(warmup)
-        return (1.0 - a) * alpha_start + a * alpha_end
-    return alpha_end
+        return f_inv((1.0 - a) * f(beta_start) + a * f(beta_end))
+    return beta_end
 
 class GenTwoPlaneMoMo(Optimizer):
     """
@@ -139,10 +146,10 @@ class GenTwoPlaneMoMo(Optimizer):
         tp_step = g["tp_step"]
 
         if beta_l_warmup_steps is not None:
-            beta_l = linear_warmup_scheduler(
+            beta_l = linear_hl_warmup_scheduler(
                 tp_step,
-                alpha_end=beta_l_final,
-                alpha_start=beta_l_start,
+                beta_end=beta_l_final,
+                beta_start=beta_l_start,
                 warmup=beta_l_warmup_steps,
             )
         else:
@@ -453,10 +460,10 @@ class GenTwoPlaneMoMo(Optimizer):
         shared_alpha_denom_correction = shared_group["alpha_denom_correction"]
 
         if beta_l_warmup is not None:
-            beta_l_global = linear_warmup_scheduler(
+            beta_l_global = linear_hl_warmup_scheduler(
                 global_beta_step,
-                alpha_end=beta_l_final,
-                alpha_start=beta_l_start,
+                beta_end=beta_l_final,
+                beta_start=beta_l_start,
                 warmup=beta_l_warmup,
             )
         else:
