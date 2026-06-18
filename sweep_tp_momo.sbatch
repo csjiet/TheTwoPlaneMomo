@@ -20,11 +20,11 @@ set -euo pipefail
 #   sbatch run_gtpmomo.sbatch 1e-3 0.9 0.999 adam 0.999 0.1
 
 LR="${1:?missing lr}"
-BETA_SHORT="${2:?missing gen_two_plane_momo_beta_short}"
-BETA_LONG="${3:?missing gen_two_plane_momo_beta_long}"
-PRECONDITIONER="${4:?missing gen_two_plane_momo_preconditioner}"
-PRECOND_BETA2="${5:?missing gen_two_plane_momo_precond_beta2}"
-WEIGHT_DECAY_FACTOR="${6:?missing gen_two_plane_momo_weight_decay_factor}"
+BETA_SHORT="${2:?missing g_tp_momo_beta_short}"
+BETA_LONG="${3:?missing g_tp_momo_beta_long}"
+PRECONDITIONER="${4:?missing g_tp_momo_preconditioner}"
+PRECOND_BETA2="${5:?missing g_tp_momo_precond_beta2}"
+WEIGHT_DECAY_FACTOR="${6:?missing g_tp_momo_weight_decay_factor}"
 
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda activate "/scratch/$USER/conda/envs/AMM"
@@ -71,14 +71,14 @@ torchrun --standalone --nproc_per_node=1 ./src/main.py \
   --opt gen_two_plane_momo \
   --lr "$LR" \
   --scheduler cos \
-  --gen_two_plane_momo_beta_short "$BETA_SHORT" \
-  --gen_two_plane_momo_beta_long "$BETA_LONG" \
-  --gen_two_plane_momo_eps 1e-12 \
-  --gen_two_plane_momo_preconditioner "$PRECONDITIONER" \
-  --gen_two_plane_momo_precond_beta2 "$PRECOND_BETA2" \
-  --gen_two_plane_momo_weight_decay_factor "$WEIGHT_DECAY_FACTOR" \
-  --gen_two_plane_momo_use_loss_ema \
-  --gen_two_plane_momo_alpha_scope network \
+  --g_tp_momo_beta_short "$BETA_SHORT" \
+  --g_tp_momo_beta_long "$BETA_LONG" \
+  --g_tp_momo_eps 1e-12 \
+  --g_tp_momo_preconditioner "$PRECONDITIONER" \
+  --g_tp_momo_precond_beta2 "$PRECOND_BETA2" \
+  --g_tp_momo_weight_decay_factor "$WEIGHT_DECAY_FACTOR" \
+  --g_tp_momo_use_loss_ema \
+  --g_tp_momo_alpha_scope network \
   --results_base_folder "$RESULTS_BASE" \
   --wandb \
   --wandb_project "$WANDB_PROJECT" \

@@ -4,13 +4,20 @@
 	tp_momo tp_momo2 \
 	g_tp_momo g_tp_momo_alpha_network_warmup g_tp_momo_no_loss_ema \
 	g_tp_momo_alpha_per_param_warmup g_tp_momo_alpha_per_param_beta_long_no_warmup \
+	g_tp_momo_alpha_per_param_warmup_and_alpha_denom_correction1 \
+	g_tp_momo_alpha_per_param_warmup_and_alpha_denom_correction2 \
+	g_tp_momo_alpha_per_param_warmup_large_lr \
+	g_tp_momo_alpha_network_warmup_large_lr \
 	med_soap med_adamw med_mars med_ademamix med_tp_momo med_tp_momo2 \
 	small_soap small_sgd small_adamw small_ademamix
 
 WANDB_PROJECT    ?= AdEMAMIX_adaptive
 WANDB_RUN_PREFIX ?= ori_llama
 WANDB_ENTITY     ?= tbal
-RUN_TAG          ?= expr1_no_warmup_16k_iter
+RUN_TAG          ?= minmax_norma_w_bias_corr_decoup_wd_expr1_16k
+# test_consistency_tpmomo_adema_expr1_16k
+# decoupled_wd_large_lr_expr1_16k
+#per_param_alpha_lb_var_big_lr_expr1_16k
 # tp_momo_per_param_vs_network_wd_0-1
 # EXPERIMENT_NAME ?= test
 # test_lb_clip_new_tp_momo
@@ -192,13 +199,13 @@ g_tp_momo:
 		--dataset $(DATASET) --iterations $(ITERATIONS) \
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
-		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
-		--gen_two_plane_momo_beta_long_start 0.9 --gen_two_plane_momo_beta_long_warmup_steps 16000 \
-		--gen_two_plane_momo_eps 1e-12 \
-		--gen_two_plane_momo_preconditioner adam \
-		--gen_two_plane_momo_precond_beta2 0.999 \
-		--gen_two_plane_momo_weight_decay_factor $(WEIGHT_DECAY) \
-		--gen_two_plane_momo_decoupled_weight_decay \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 --g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		--g_tp_momo_decoupled_weight_decay \
 		$(COMMON_ARGS) \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
@@ -211,17 +218,40 @@ g_tp_momo_alpha_network_warmup:
 		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
 		--dataset $(DATASET) --iterations $(ITERATIONS) \
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
-		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
-		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
-		--gen_two_plane_momo_beta_long_start 0.9 \
-		--gen_two_plane_momo_beta_long_warmup_steps 16000 \
-		--gen_two_plane_momo_eps 1e-12 \
-		--gen_two_plane_momo_preconditioner adam \
-		--gen_two_plane_momo_precond_beta2 0.999 \
-		--gen_two_plane_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		--opt gen_two_plane_momo --lr 5e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
 		$(COMMON_ARGS) \
-		--gen_two_plane_momo_use_loss_ema \
-		--gen_two_plane_momo_alpha_scope network \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope network \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+decoupled_wd_g_tp_momo_alpha_network_warmup:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 5e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-8 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+    --g_tp_momo_decoupled_weight_decay \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope network \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
 g_tp_momo_no_loss_ema:
@@ -234,15 +264,15 @@ g_tp_momo_no_loss_ema:
 		--dataset $(DATASET) --iterations $(ITERATIONS) \
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
-		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
-		--gen_two_plane_momo_beta_long_start 0.9 --gen_two_plane_momo_beta_long_warmup_steps 16000 \
-		--gen_two_plane_momo_eps 1e-12 \
-		--gen_two_plane_momo_preconditioner adam \
-		--gen_two_plane_momo_precond_beta2 0.999 \
-		--gen_two_plane_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 --g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
 		$(COMMON_ARGS) \
-		--no-gen_two_plane_momo_use_loss_ema \
-		--gen_two_plane_momo_alpha_scope network \
+		--no-g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope network \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
 g_tp_momo_alpha_per_param_warmup:
@@ -255,21 +285,90 @@ g_tp_momo_alpha_per_param_warmup:
 		--dataset $(DATASET) --iterations $(ITERATIONS) \
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
-		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
-		--gen_two_plane_momo_beta_long_start 0.9 \
-		--gen_two_plane_momo_beta_long_warmup_steps 16000 \
-		--gen_two_plane_momo_eps 1e-12 \
-		--gen_two_plane_momo_preconditioner adam \
-		--gen_two_plane_momo_precond_beta2 0.999 \
-		--gen_two_plane_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
 		$(COMMON_ARGS) \
-		--gen_two_plane_momo_use_loss_ema \
-		--gen_two_plane_momo_alpha_scope parameter \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope parameter \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+decoupled_wd_g_tp_momo_alpha_per_param_warmup:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 5e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-8 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+    --g_tp_momo_decoupled_weight_decay \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope parameter \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+g_tp_momo_alpha_per_param_warmup_and_alpha_denom_correction1:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_denom_correction 10.0 \
+		--g_tp_momo_alpha_scope parameter \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+g_tp_momo_alpha_per_param_warmup_and_alpha_denom_correction2:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_denom_correction -10.0 \
+		--g_tp_momo_alpha_scope parameter \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
 # NOTE: No warmup for TwoPlaneMoMo corresponds to just omitting setting these 
-# --gen_two_plane_momo_beta_long_start 0.9 \
-# --gen_two_plane_momo_beta_long_warmup_steps 1 \
+# --g_tp_momo_beta_long_start 0.9 \
+# --g_tp_momo_beta_long_warmup_steps 1 \
 
 g_tp_momo_alpha_per_param_beta_long_no_warmup:
 	mkdir -p $(RESULTS_BASE)
@@ -281,14 +380,60 @@ g_tp_momo_alpha_per_param_beta_long_no_warmup:
 		--dataset $(DATASET) --iterations $(ITERATIONS) \
 		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
 		--opt gen_two_plane_momo --lr 1e-3 --scheduler cos \
-		--gen_two_plane_momo_beta_short 0.9 --gen_two_plane_momo_beta_long 0.999 \
-		--gen_two_plane_momo_eps 1e-12 \
-		--gen_two_plane_momo_preconditioner adam \
-		--gen_two_plane_momo_precond_beta2 0.999 \
-		--gen_two_plane_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
 		$(COMMON_ARGS) \
-		--gen_two_plane_momo_use_loss_ema \
-		--gen_two_plane_momo_alpha_scope parameter \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_scope parameter \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+g_tp_momo_alpha_per_param_warmup_large_lr:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 5e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_denom_correction 0.0 \
+		--g_tp_momo_alpha_scope parameter \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+g_tp_momo_alpha_network_warmup_large_lr:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_two_plane_momo --lr 5e-3 --scheduler cos \
+		--g_tp_momo_beta_short 0.9 --g_tp_momo_beta_long 0.999 \
+		--g_tp_momo_beta_long_start 0.9 \
+		--g_tp_momo_beta_long_warmup_steps 16000 \
+		--g_tp_momo_eps 1e-12 \
+		--g_tp_momo_preconditioner adam \
+		--g_tp_momo_precond_beta2 0.999 \
+		--g_tp_momo_weight_decay_factor $(WEIGHT_DECAY) \
+		$(COMMON_ARGS) \
+		--g_tp_momo_use_loss_ema \
+		--g_tp_momo_alpha_denom_correction 0.0 \
+		--g_tp_momo_alpha_scope network \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
 # Medium experiment variants

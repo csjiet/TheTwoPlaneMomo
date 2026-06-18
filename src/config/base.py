@@ -131,23 +131,23 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument("--adema_beta3_warmup", default=None, type=int)
     parser.add_argument("--adema_alpha_warmup", default=None, type=int)
     # MODIFIED
-    parser.add_argument("--gen_two_plane_momo_beta_short", default=0.9, type=float)
-    parser.add_argument("--gen_two_plane_momo_beta_long", default=0.999, type=float)
-    parser.add_argument( "--gen_two_plane_momo_beta_long_start", default=0.5, type=float)
-    parser.add_argument( "--gen_two_plane_momo_beta_long_warmup_steps", default=None, type=int)
-    parser.add_argument("--gen_two_plane_momo_eps", default=1e-12, type=float)
-    parser.add_argument("--gen_two_plane_momo_clip_alpha", default=True, type=bool)
-    parser.add_argument("--gen_two_plane_momo_use_loss_ema", action="store_true")
-    parser.add_argument("--no-gen_two_plane_momo_use_loss_ema", dest="gen_two_plane_momo_use_loss_ema", action="store_false")
-    parser.add_argument("--gen_two_plane_momo_alpha_denom_correction", default=0.0, type=float)
-    parser.set_defaults(gen_two_plane_momo_use_loss_ema=True)
-    parser.add_argument("--gen_two_plane_momo_preconditioner", default="identity", type=str)
-    parser.add_argument("--gen_two_plane_momo_precond_beta2", default=0.999, type=float)
-    parser.add_argument("--gen_two_plane_momo_weight_decay_factor", default=0.0, type=float)
-    parser.add_argument("--gen_two_plane_momo_eps_precond", default=1e-12, type=float)
-    parser.add_argument("--gen_two_plane_momo_decoupled_weight_decay", action="store_true")
+    parser.add_argument("--g_tp_momo_beta_short", default=0.9, type=float)
+    parser.add_argument("--g_tp_momo_beta_long", default=0.999, type=float)
+    parser.add_argument( "--g_tp_momo_beta_long_start", default=0.5, type=float)
+    parser.add_argument( "--g_tp_momo_beta_long_warmup_steps", default=None, type=int)
+    parser.add_argument("--g_tp_momo_eps", default=1e-12, type=float)
+    parser.add_argument("--g_tp_momo_clip_alpha", default=True, type=bool)
+    parser.add_argument("--g_tp_momo_use_loss_ema", action="store_true")
+    parser.add_argument("--no-g_tp_momo_use_loss_ema", dest="g_tp_momo_use_loss_ema", action="store_false")
+    parser.add_argument("--g_tp_momo_alpha_denom_correction", default=0.0, type=float)
+    parser.set_defaults(g_tp_momo_use_loss_ema=True)
+    parser.add_argument("--g_tp_momo_preconditioner", default="identity", type=str)
+    parser.add_argument("--g_tp_momo_precond_beta2", default=0.999, type=float)
+    parser.add_argument("--g_tp_momo_weight_decay_factor", default=0.0, type=float)
+    parser.add_argument("--g_tp_momo_eps_precond", default=1e-12, type=float)
+    parser.add_argument("--g_tp_momo_decoupled_weight_decay", action="store_true")
     parser.add_argument(
-            "--gen_two_plane_momo_alpha_scope",
+            "--g_tp_momo_alpha_scope",
             default="network",
             choices=["parameter", "network"],
             type=str,

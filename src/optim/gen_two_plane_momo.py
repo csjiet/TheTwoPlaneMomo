@@ -4,7 +4,18 @@ import math
 import torch
 from torch.optim import Optimizer
 
-# AdEMAMix linear scheduler
+
+####################################################
+# Sanity check only. Comment out once done: forces alpha1 and alpha2 to match ademamix's for consistency check 
+# AdEMAMix alpha scheduler
+def linear_warmup_scheduler(step, alpha_end, alpha_start=0, warmup=1):
+    if step < warmup:
+        a = step / float(warmup)
+        return (1.0 - a) * alpha_start + a * alpha_end
+    return alpha_end
+####################################################
+
+# AdEMAMix beta3 scheduler
 def linear_hl_warmup_scheduler(step, beta_end, beta_start=0, warmup=1):
     def f(beta, eps=1e-8):
         return math.log(0.5) / math.log(beta + eps) - 1
@@ -53,8 +64,6 @@ class GenTwoPlaneMoMo(Optimizer):
             raise ValueError("beta_long in [0,1)")
         if eps <= 0:
             raise ValueError("eps must be > 0")
-        if alpha_denom_correction < 0:
-            raise ValueError("alpha_denom_correction must be >= 0")
         if preconditioner not in ("identity", "adam"):
             raise ValueError("preconditioner must be either {'identity', 'adam'}")
         if not (0.0 <= precond_beta2 < 1.0):
@@ -143,7 +152,8 @@ class GenTwoPlaneMoMo(Optimizer):
         clip_alpha = g["tp_clip_alpha"]
         use_loss_ema = g["tp_use_loss_ema"]
         alpha_denom_correction = g["alpha_denom_correction"]
-        tp_step = g["tp_step"]
+        stored_tp_step = g["tp_step"]
+        tp_step = stored_tp_step + 1 # To match AdEMAMix which uses pre-increment timeline
 
         if beta_l_warmup_steps is not None:
             beta_l = linear_hl_warmup_scheduler(
@@ -199,7 +209,7 @@ class GenTwoPlaneMoMo(Optimizer):
                 raise ValueError("All parameter groups must share the same tp_gamma1 for network-wide GenTwoPlaneMoMo.")
             if group["tp_gamma2"] != gamma2:
                 raise ValueError("All parameter groups must share the same tp_gamma2 for network-wide GenTwoPlaneMoMo.")
-            if group["tp_step"] != tp_step:
+            if group["tp_step"] != stored_tp_step:
                 raise ValueError("All parameter groups must share the same tp_step for network-wide GenTwoPlaneMoMo.")
 
         lr_safe = max(lr, eps)
@@ -209,7 +219,9 @@ class GenTwoPlaneMoMo(Optimizer):
         num_fac = (1 + (lr_safe * mu_model)) / lr_safe
 
         # For: \hat{v}_t --- the bias corrected second moment estimate --- used in the Adam preconditioner.
-        bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step + 1))
+        # bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step + 1))
+        bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step)) # To match AdEMAMix which uses pre-increment timeline
+
         bias_correction_denom = max(bias_correction_denom, eps)
 
         if use_loss_ema:
@@ -227,6 +239,15 @@ class GenTwoPlaneMoMo(Optimizer):
         logged_mom_vec1_vec2_dot_prod = 0.0
         logged_grad_m1_dot_prod = 0.0
         logged_grad_m2_dot_prod = 0.0
+
+        logged_grad_squared_norm = 0.0  
+        logged_m1_minus_m2_squared_norm = 0.0  
+
+        pinv_diag_entry_sum = 0.0  
+        pinv_diag_entry_max = 0.0  
+        pinv_diag_entry_count = 0  
+        pinv_m2_squared_norm = 0.0  
+        pinv_m1_minus_m2_squared_norm = 0.0  
 
         # For: lambda_1,unc
         m1_dot_w_t = 0.0
@@ -266,6 +287,12 @@ class GenTwoPlaneMoMo(Optimizer):
                 m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
                 m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)  # m_t^{(2)} = \Beta_long m_{t-1}^{(2)} + (1 - \Beta_long) g_t
 
+                # m1_for_update = m1
+                ####################################################
+                # Temporary: Potentially consider bias correction to momentum 1.
+                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                ####################################################
+
                 # For: lambda_unc, and w_{t+1}
                 # Choose preconditioner
                 if precond == "adam":
@@ -279,19 +306,29 @@ class GenTwoPlaneMoMo(Optimizer):
                     # precond_t_inv_flattened = (P_t^{-1}_{1,1}, ..., P_t^{-1}_{n,n})
                     v_t_hat = v_t / bias_correction_denom # \hat{v_t}
                     precond_t_inv_flattened = v_t_hat.sqrt().add_(eps_precond).reciprocal()
+
+                    pinv_diag_entry_sum += precond_t_inv_flattened.sum().item()  
+                    pinv_diag_entry_max = max(pinv_diag_entry_max, precond_t_inv_flattened.max().item())  
+                    pinv_diag_entry_count += precond_t_inv_flattened.numel()  
+
+                    pinv_m2_squared_norm += torch.dot((precond_t_inv_flattened * m2).flatten(), (precond_t_inv_flattened * m2).flatten()).item()  
+                    pinv_m1_minus_m2_squared_norm += torch.dot((precond_t_inv_flattened * (m1_for_update - m2)).flatten(), (precond_t_inv_flattened * (m1_for_update - m2)).flatten()).item()  
                 else:
                     precond_t_inv_flattened = None
 
                 # global inner products (only for wandb logging analysis)
-                logged_mom_vec_1_squared_norm += torch.dot(m1.flatten(), m1.flatten()).item()
+                logged_mom_vec_1_squared_norm += torch.dot(m1_for_update.flatten(), m1_for_update.flatten()).item()
                 logged_mom_vec_2_squared_norm += torch.dot(m2.flatten(), m2.flatten()).item()
-                logged_mom_vec1_vec2_dot_prod += torch.dot(m1.flatten(), m2.flatten()).item()
-                logged_grad_m1_dot_prod += torch.dot(grad.flatten(), m1.flatten()).item()
+                logged_mom_vec1_vec2_dot_prod += torch.dot(m1_for_update.flatten(), m2.flatten()).item()
+                logged_grad_m1_dot_prod += torch.dot(grad.flatten(), m1_for_update.flatten()).item()
                 logged_grad_m2_dot_prod += torch.dot(grad.flatten(), m2.flatten()).item()
+
+                logged_grad_squared_norm += torch.dot(grad.flatten(), grad.flatten()).item()  
+                logged_m1_minus_m2_squared_norm += torch.dot((m1_for_update - m2).flatten(), (m1_for_update - m2).flatten()).item()  
 
                 # For: lambda_1,unc
                 w_t = p.detach().float()
-                m1_dot_w_t += torch.dot(m1.flatten(), w_t.flatten()).item() # <m_t^{(1)}, w_t> (second term in the numerator) 
+                m1_dot_w_t += torch.dot(m1_for_update.flatten(), w_t.flatten()).item() # <m_t^{(1)}, w_t> (second term in the numerator) 
                 m2_dot_w_t += torch.dot(m2.flatten(), w_t.flatten()).item() # <m_t^{(2)}, w_t> (second term in the numerator)
 
                 # For: lambda_1,unc --- MoMo: by first building \gamma_{t}^{(i)} -> build b_t^{(1)} and b_t^{(2)} -> build lambda_1_unc.
@@ -300,7 +337,7 @@ class GenTwoPlaneMoMo(Optimizer):
                 # preconditioned quadratic forms for lambda_1,unc
                 if precond == "adam":
                     # For: lambda_1,unc  (numerator and denominator)
-                    m1_minus_m2 = (m1 - m2) # m_t^{(1)} - m_t^{(2)} 
+                    m1_minus_m2 = (m1_for_update - m2) # m_t^{(1)} - m_t^{(2)} 
                     # For: lambda_1,unc (denominator)
                     # (m1_minus_m2)^T P_t^{-1} (m1_minus_m2) --- quadratic form!
                     # Since P_t^{-1} is diagonal we can compute this equivalently as the sum over coordinates:
@@ -312,7 +349,7 @@ class GenTwoPlaneMoMo(Optimizer):
                     #   numer_m1_m2_precond_inv_m2 = \sum_i (P_t^{-1})_{i,i} * (m1_minus_m2)_i * (m_t^{(2)})_i
                     numer_m1_m2_precond_inv_m2 += torch.sum(m1_minus_m2 * precond_t_inv_flattened * m2).item()
                 else:
-                    m1_minus_m2 = (m1 - m2)
+                    m1_minus_m2 = (m1_for_update - m2)
                     denom_m1_m2_precond_inv_m1_m2 += torch.dot(m1_minus_m2.flatten(), m1_minus_m2.flatten()).item()
                     numer_m1_m2_precond_inv_m2 += torch.dot(m1_minus_m2.flatten(), m2.flatten()).item()
 
@@ -344,6 +381,12 @@ class GenTwoPlaneMoMo(Optimizer):
             log_dict["two_plane_momo/network/gamma2"] = float(gamma2)
             log_dict["two_plane_momo/network/b1"] = float(b1)
             log_dict["two_plane_momo/network/b2"] = float(b2)
+            log_dict["two_plane_momo/network/<m_t^(1), w_t>"] = float(m1_dot_w_t)  
+            log_dict["two_plane_momo/network/<m_t^(2), w_t>"] = float(m2_dot_w_t)  
+            log_dict["two_plane_momo/network/<m_t^(1), w_t>-<m_t^(2), w_t>"] = float(m1_dot_w_t - m2_dot_w_t)  
+            log_dict["two_plane_momo/network/<g_t, w_t>"] = float(g_t_dot_w_t)  
+            log_dict["two_plane_momo/network/barf1_minus_barf2"] = float(barf1 - barf2)  
+            log_dict["two_plane_momo/network/gamma1_minus_gamma2"] = float(gamma1 - gamma2)  
 
         # For: lambda_1,unc (2nd term in the numerator: (m1 - m2)^T w_t)
         m1_minus_m2_dot_wt = (m1_dot_w_t - m2_dot_w_t)
@@ -372,7 +415,67 @@ class GenTwoPlaneMoMo(Optimizer):
             alpha1 = alpha1_unc
             if clip_alpha:
                 alpha1 = min(alpha_max, max(alpha_min, alpha1))
+
+        numer_term_A_num_fac_times_b_gap = num_fac * (b1 - b2)  
+        numer_term_B_mu_times_m1_minus_m2_dot_wt = mu_model * m1_minus_m2_dot_wt  
+        numer_term_C_m1_minus_m2_dot_Pinv_m2 = numer_m1_m2_precond_inv_m2  
+        final_numer = numer_term_A_num_fac_times_b_gap - numer_term_B_mu_times_m1_minus_m2_dot_wt - numer_term_C_m1_minus_m2_dot_Pinv_m2  
+
+        alpha1_unc_from_final_numer_over_corrected_denom = final_numer / corrected_denom if corrected_denom > 0.0 else 0.0  
+        abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom = abs(alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom)  
+        indicator_alpha1_unc_less_than_0 = float(alpha1_unc < 0.0)  
+        indicator_alpha1_unc_greater_than_1 = float(alpha1_unc > 1.0)  
+        indicator_final_denom_raw_less_than_eps = float(final_denom < eps)  
+
+        eps_cos = 1e-12  
+        cos_sim_m_t1_m_t2 = logged_mom_vec1_vec2_dot_prod / ((logged_mom_vec_1_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
+        cos_sim_g_t_m_t1 = logged_grad_m1_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_1_squared_norm**0.5) + eps_cos)  
+        cos_sim_g_t_m_t2 = logged_grad_m2_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
+
+
+        ####################################################
+        # Temporary: sliding-window min-max normalization for alpha1_unc.
+        alpha_window_size = 500
+
+        if "tp_alpha1_unc_window" not in g:
+            g["tp_alpha1_unc_window"] = []
+
+        g["tp_alpha1_unc_window"].append(float(alpha1_unc))
+
+        if len(g["tp_alpha1_unc_window"]) > alpha_window_size:
+            g["tp_alpha1_unc_window"] = g["tp_alpha1_unc_window"][-alpha_window_size:]
+
+        alpha1_window_min = min(g["tp_alpha1_unc_window"])
+        alpha1_window_max = max(g["tp_alpha1_unc_window"])
+        alpha1_window_range = alpha1_window_max - alpha1_window_min
+
+        if alpha1_window_range <= eps:
+            alpha1_norm_01 = 0.5
+        else:
+            alpha1_norm_01 = (float(alpha1_unc) - alpha1_window_min) / alpha1_window_range
+            alpha1_norm_01 = min(1.0, max(0.0, alpha1_norm_01))
+
+        alpha1 = alpha_min + (alpha_max - alpha_min) * alpha1_norm_01
+
+        if clip_alpha:
+            alpha1 = min(alpha_max, max(alpha_min, alpha1))
+        ####################################################
+
         alpha2 = 1.0 - alpha1
+        ####################################################
+        # Sanity check only. Comment out once done: forces alpha1 and alpha2 to match ademamix's for consistency check 
+        # schedule_step = tp_step
+        # bias_correction1_for_ademamix_match = 1.0 - (beta_s ** schedule_step)
+        # bias_correction1_for_ademamix_match = max(bias_correction1_for_ademamix_match, eps)
+
+        # alpha1 = 1.0 / bias_correction1_for_ademamix_match
+        # alpha2 = linear_warmup_scheduler(
+        #         schedule_step,
+        #         alpha_end=8.0,
+        #         alpha_start=0,
+        #         warmup=16000,
+        #         )
+        ####################################################
         self.last_alpha1 = alpha1
 
         # wandb logging
@@ -387,6 +490,36 @@ class GenTwoPlaneMoMo(Optimizer):
             log_dict["two_plane_momo/network/<g_t, m_t^(1)>"] = float(logged_grad_m1_dot_prod)
             log_dict["two_plane_momo/network/<g_t, m_t^(2)>"] = float(logged_grad_m2_dot_prod)
 
+            log_dict["two_plane_momo/network/corrected_denom"] = float(corrected_denom)  
+            log_dict["two_plane_momo/network/b1_minus_b2"] = float(b1 - b2)  
+
+            log_dict["two_plane_momo/network/final_numer"] = float(final_numer)  
+            log_dict["two_plane_momo/network/numer_term_A_num_fac_times_b_gap"] = float(numer_term_A_num_fac_times_b_gap)  
+            log_dict["two_plane_momo/network/numer_term_B_mu_times_m1_minus_m2_dot_wt"] = float(numer_term_B_mu_times_m1_minus_m2_dot_wt)  
+            log_dict["two_plane_momo/network/numer_term_C_m1_minus_m2_dot_Pinv_m2"] = float(numer_term_C_m1_minus_m2_dot_Pinv_m2)  
+
+            log_dict["two_plane_momo/network/alpha1_unc_from_final_numer_over_corrected_denom"] = float(alpha1_unc_from_final_numer_over_corrected_denom)  
+            log_dict["two_plane_momo/network/|alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom|"] = float(abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom)  
+            log_dict["two_plane_momo/network/indicator_alpha1_unc_less_than_0"] = float(indicator_alpha1_unc_less_than_0)  
+            log_dict["two_plane_momo/network/indicator_alpha1_unc_greater_than_1"] = float(indicator_alpha1_unc_greater_than_1)  
+            log_dict["two_plane_momo/network/indicator_final_denom_raw_less_than_eps"] = float(indicator_final_denom_raw_less_than_eps)  
+
+            log_dict["two_plane_momo/network/||g_t||_{2}^{2}"] = float(logged_grad_squared_norm)  
+            log_dict["two_plane_momo/network/||m_t^{(1)}-m_t^{(2)}||_{2}^{2}"] = float(logged_m1_minus_m2_squared_norm)  
+            log_dict["two_plane_momo/network/cos_sim(m_t^(1), m_t^(2))"] = float(cos_sim_m_t1_m_t2)  
+            log_dict["two_plane_momo/network/cos_sim(g_t, m_t^(1))"] = float(cos_sim_g_t_m_t1)  
+            log_dict["two_plane_momo/network/cos_sim(g_t, m_t^(2))"] = float(cos_sim_g_t_m_t2)  
+
+            if precond == "adam":  
+                pinv_diag_entry_mean = pinv_diag_entry_sum / max(1, pinv_diag_entry_count)  
+                log_dict["two_plane_momo/network/pinv_diag_entry_mean"] = float(pinv_diag_entry_mean)  
+                log_dict["two_plane_momo/network/pinv_diag_entry_max"] = float(pinv_diag_entry_max)  
+                log_dict["two_plane_momo/network/||P_t^{-1} m_t^(2)||_{2}^{2}"] = float(pinv_m2_squared_norm)  
+                log_dict["two_plane_momo/network/||P_t^{-1} (m_t^(1)-m_t^(2))||_{2}^{2}"] = float(pinv_m1_minus_m2_squared_norm)  
+
+        m_t_1_dot_w_t_plus_1_minus_w_t = 0.0
+        m_t_2_dot_w_t_plus_1_minus_w_t = 0.0
+
         # apply iterate update w_{t+1}
         # w_{t+1} = (1 / (1 + \eta*\mu)) w_t - (\eta / (1 + \eta*\mu)) P_t^{-1} (\lambda_1 m_t^{(1)} + (1 - \lambda_1) m_t^{(2)})
         for group in self.param_groups:
@@ -396,8 +529,14 @@ class GenTwoPlaneMoMo(Optimizer):
                 m1 = self.state[p]["m1"]
                 m2 = self.state[p]["m2"]
 
+                # m1_for_update = m1
+                ####################################################
+                # Temporary: Potentially consider bias correction to momentum 1.
+                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                ####################################################
+
                 # convex-combo momentum m = alpha1*m1 + alpha2*m2
-                mom_vec_cvx_combo = alpha1 * m1 + alpha2 * m2
+                mom_vec_cvx_combo = alpha1 * m1_for_update + alpha2 * m2
 
                 # apply preconditioner as Pinv
                 if precond == "adam":
@@ -411,10 +550,24 @@ class GenTwoPlaneMoMo(Optimizer):
                 # Decoupled weight decay (AdamW): apply decay directly to the parameters!
                 # then apply the preconditioned momentum step w/ no proximal shrinkage factor
                 if decoupled_wd:
+                    p_old = p.detach().float()  
+                    # w_{t+1} = (1 - lr*mu) w_t - lr*step_dir  ==>  w_{t+1} - w_t = -lr*mu*w_t - lr*step_dir
+                    w_t_plus_1_minus_w_t = (-lr * mu) * p_old - lr * step_dir.detach().float()  
+                    m_t_1_dot_w_t_plus_1_minus_w_t += torch.dot(m1_for_update.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+                    m_t_2_dot_w_t_plus_1_minus_w_t += torch.dot(m2.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+
                     if mu != 0.0:
                         p.add_(p, alpha=-lr * mu)
                     p.add_(step_dir.to(p.dtype), alpha=-lr)
                     continue
+
+                p_old = p.detach().float()  
+                denom_for_dw = (1.0 + lr * mu)  
+                shrink = (1.0 / denom_for_dw)  
+                scale = (lr / denom_for_dw)  
+                w_t_plus_1_minus_w_t = (shrink - 1.0) * p_old - scale * step_dir.detach().float()  
+                m_t_1_dot_w_t_plus_1_minus_w_t += torch.dot(m1_for_update.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+                m_t_2_dot_w_t_plus_1_minus_w_t += torch.dot(m2.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
 
                 # The new step for the optimizer: proximal coupled weight decay step
                 # w_{t+1} = (1/(1+ (eta * mu))) w_t - (η/(1+(eta * mu))) Pinv( alpha1*m1 + (1-alpha1)*m2 )
@@ -422,8 +575,21 @@ class GenTwoPlaneMoMo(Optimizer):
                 p.mul_(1.0 / denom)
                 p.add_(step_dir.to(p.dtype), alpha=-lr / denom)
 
+        ell_t_1_of_w_t_plus_1 = b1 + m_t_1_dot_w_t_plus_1_minus_w_t  
+        ell_t_2_of_w_t_plus_1 = b2 + m_t_2_dot_w_t_plus_1_minus_w_t  
+        ell_t_1_of_w_t_plus_1_minus_ell_t_2_of_w_t_plus_1 = ell_t_1_of_w_t_plus_1 - ell_t_2_of_w_t_plus_1  
+
+        if log_dict is not None:  
+            log_dict["two_plane_momo/network/ell_t^(1)(w_{t+1})"] = float(ell_t_1_of_w_t_plus_1)  
+            log_dict["two_plane_momo/network/ell_t^(2)(w_{t+1})"] = float(ell_t_2_of_w_t_plus_1)  
+            log_dict["two_plane_momo/network/ell_t^(1)(w_{t+1})-ell_t^(2)(w_{t+1})"] = float(ell_t_1_of_w_t_plus_1_minus_ell_t_2_of_w_t_plus_1)  
+            log_dict["two_plane_momo/network/<m_t^(1), w_{t+1}-w_t>"] = float(m_t_1_dot_w_t_plus_1_minus_w_t)  
+            log_dict["two_plane_momo/network/<m_t^(2), w_{t+1}-w_t>"] = float(m_t_2_dot_w_t_plus_1_minus_w_t)  
+
         # write back optimizer-global state to all param groups for run resume correctness
-        next_step = tp_step + 1
+        # next_step = tp_step + 1
+        next_step = tp_step # To match AdEMAMix which uses pre-increment timeline
+
         for _grp in self.param_groups:
             _grp["tp_barf1"] = barf1
             _grp["tp_barf2"] = barf2
@@ -457,6 +623,7 @@ class GenTwoPlaneMoMo(Optimizer):
         beta_l_start = shared_group["beta_long_start"]
         beta_l_warmup = shared_group["beta_long_warmup_steps"]
         global_beta_step = shared_group["tp_step"]
+        global_beta_step = global_beta_step + 1 # To match AdEMAMix which uses pre-increment timeline
         shared_alpha_denom_correction = shared_group["alpha_denom_correction"]
 
         if beta_l_warmup is not None:
@@ -558,14 +725,23 @@ class GenTwoPlaneMoMo(Optimizer):
                 gamma1 = state["gamma1"]
                 gamma2 = state["gamma2"]
                 tp_step = state["tp_step"]
+                tp_step = tp_step + 1 # To match AdEMAMix which uses pre-increment timeline
 
                 # bias-correction factor for AdamW second moment estimate for beta2
-                bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step + 1))
+                # bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step + 1))
+                bias_correction_denom = 1.0 - (precond_beta2 ** (tp_step)) # To match AdEMAMix which uses pre-increment timeline
+
                 bias_correction_denom = max(bias_correction_denom, eps)
 
                 # two EMAs of the gradient
                 m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)
                 m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)
+
+                # m1_for_update = m1
+                ####################################################
+                # Temporary: Potentially consider bias correction to momentum 1.
+                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                ####################################################
 
                 # Choose preconditioner
                 if precond == "adam":
@@ -576,23 +752,29 @@ class GenTwoPlaneMoMo(Optimizer):
                 else:
                     precond_t_inv_flattened = None
 
-                logged_mom_vec_1_squared_norm = torch.dot(m1.flatten(), m1.flatten()).item()
+                logged_mom_vec_1_squared_norm = torch.dot(m1_for_update.flatten(), m1_for_update.flatten()).item()
                 logged_mom_vec_2_squared_norm = torch.dot(m2.flatten(), m2.flatten()).item()
-                logged_mom_vec1_vec2_dot_prod = torch.dot(m1.flatten(), m2.flatten()).item()
-                logged_grad_m1_dot_prod = torch.dot(grad.flatten(), m1.flatten()).item()
+                logged_mom_vec1_vec2_dot_prod = torch.dot(m1_for_update.flatten(), m2.flatten()).item()
+                logged_grad_m1_dot_prod = torch.dot(grad.flatten(), m1_for_update.flatten()).item()
                 logged_grad_m2_dot_prod = torch.dot(grad.flatten(), m2.flatten()).item()
+                logged_grad_squared_norm = torch.dot(grad.flatten(), grad.flatten()).item()  
+                logged_m1_minus_m2_squared_norm = torch.dot((m1_for_update - m2).flatten(), (m1_for_update - m2).flatten()).item()  
 
                 w_t = p.detach().float()
-                m1_dot_w_t = torch.dot(m1.flatten(), w_t.flatten()).item()
+                m1_dot_w_t = torch.dot(m1_for_update.flatten(), w_t.flatten()).item()
                 m2_dot_w_t = torch.dot(m2.flatten(), w_t.flatten()).item()
                 g_t_dot_w_t = torch.dot(grad.flatten(), w_t.flatten()).item()
 
                 if precond == "adam":
-                    m1_minus_m2 = (m1 - m2)
+                    m1_minus_m2 = (m1_for_update - m2)
                     final_denom = torch.sum(m1_minus_m2 * precond_t_inv_flattened * m1_minus_m2).item()
                     numer_m1_m2_precond_inv_m2 = torch.sum(m1_minus_m2 * precond_t_inv_flattened * m2).item()
+                    pinv_diag_entry_mean = precond_t_inv_flattened.mean().item()  
+                    pinv_diag_entry_max = precond_t_inv_flattened.max().item()  
+                    pinv_m2_squared_norm = torch.dot((precond_t_inv_flattened * m2).flatten(), (precond_t_inv_flattened * m2).flatten()).item()  
+                    pinv_m1_minus_m2_squared_norm = torch.dot((precond_t_inv_flattened * (m1_for_update - m2)).flatten(), (precond_t_inv_flattened * (m1_for_update - m2)).flatten()).item()  
                 else:
-                    m1_minus_m2 = (m1 - m2)
+                    m1_minus_m2 = (m1_for_update - m2)
                     final_denom = torch.dot(m1_minus_m2.flatten(), m1_minus_m2.flatten()).item()
                     numer_m1_m2_precond_inv_m2 = torch.dot(m1_minus_m2.flatten(), m2.flatten()).item()
 
@@ -611,10 +793,18 @@ class GenTwoPlaneMoMo(Optimizer):
                 # wandb logging
                 if log_dict is not None:
                     prefix = f"two_plane_momo/group_{group_idx}/parameter_{param_log_idx}"
+                    log_dict[f"{prefix}/barf1"] = float(barf1)  
+                    log_dict[f"{prefix}/barf2"] = float(barf2)  
                     log_dict[f"{prefix}/gamma1"] = float(gamma1)
                     log_dict[f"{prefix}/gamma2"] = float(gamma2)
                     log_dict[f"{prefix}/b1"] = float(b1)
                     log_dict[f"{prefix}/b2"] = float(b2)
+                    log_dict[f"{prefix}/<m_t^(1), w_t>"] = float(m1_dot_w_t)  
+                    log_dict[f"{prefix}/<m_t^(2), w_t>"] = float(m2_dot_w_t)  
+                    log_dict[f"{prefix}/<m_t^(1), w_t>-<m_t^(2), w_t>"] = float(m1_dot_w_t - m2_dot_w_t)  
+                    log_dict[f"{prefix}/<g_t, w_t>"] = float(g_t_dot_w_t)  
+                    log_dict[f"{prefix}/barf1_minus_barf2"] = float(barf1 - barf2)  
+                    log_dict[f"{prefix}/gamma1_minus_gamma2"] = float(gamma1 - gamma2)  
 
                 # second term in the numerator: (m1 - m2)^T w_t
                 m1_minus_m2_dot_wt = (m1_dot_w_t - m2_dot_w_t)
@@ -632,7 +822,65 @@ class GenTwoPlaneMoMo(Optimizer):
                     alpha1 = alpha1_unc
                     if clip_alpha:
                         alpha1 = min(alpha_max, max(alpha_min, alpha1))
+                numer_term_A_num_fac_times_b_gap = num_fac * (b1 - b2)  
+                numer_term_B_mu_times_m1_minus_m2_dot_wt = mu_model * m1_minus_m2_dot_wt  
+                numer_term_C_m1_minus_m2_dot_Pinv_m2 = numer_m1_m2_precond_inv_m2  
+                final_numer = numer_term_A_num_fac_times_b_gap - numer_term_B_mu_times_m1_minus_m2_dot_wt - numer_term_C_m1_minus_m2_dot_Pinv_m2  
+
+                alpha1_unc_from_final_numer_over_corrected_denom = final_numer / corrected_denom if corrected_denom > 0.0 else 0.0  
+                abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom = abs(alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom)  
+                indicator_alpha1_unc_less_than_0 = float(alpha1_unc < 0.0)  
+                indicator_alpha1_unc_greater_than_1 = float(alpha1_unc > 1.0)  
+                indicator_final_denom_raw_less_than_eps = float(final_denom < eps)  
+
+                eps_cos = 1e-12  
+                cos_sim_m_t1_m_t2 = logged_mom_vec1_vec2_dot_prod / ((logged_mom_vec_1_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
+                cos_sim_g_t_m_t1 = logged_grad_m1_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_1_squared_norm**0.5) + eps_cos)  
+                cos_sim_g_t_m_t2 = logged_grad_m2_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
+
+                ####################################################
+                # Temporary: sliding-window min-max normalization for alpha1_unc.
+                alpha_window_size = 500
+
+                if "tp_alpha1_unc_window" not in state:
+                    state["tp_alpha1_unc_window"] = []
+
+                state["tp_alpha1_unc_window"].append(float(alpha1_unc))
+
+                if len(state["tp_alpha1_unc_window"]) > alpha_window_size:
+                    state["tp_alpha1_unc_window"] = state["tp_alpha1_unc_window"][-alpha_window_size:]
+
+                alpha1_window_min = min(state["tp_alpha1_unc_window"])
+                alpha1_window_max = max(state["tp_alpha1_unc_window"])
+                alpha1_window_range = alpha1_window_max - alpha1_window_min
+
+                if alpha1_window_range <= eps:
+                    alpha1_norm_01 = 0.5
+                else:
+                    alpha1_norm_01 = (float(alpha1_unc) - alpha1_window_min) / alpha1_window_range
+                    alpha1_norm_01 = min(1.0, max(0.0, alpha1_norm_01))
+
+                alpha1 = alpha_min + (alpha_max - alpha_min) * alpha1_norm_01
+
+                if clip_alpha:
+                    alpha1 = min(alpha_max, max(alpha_min, alpha1))
+                ####################################################
+
                 alpha2 = 1.0 - alpha1
+                ####################################################
+                # Sanity check only. Comment out once done: forces alpha1 and alpha2 to match ademamix's for consistency check 
+                # schedule_step = tp_step
+                # bias_correction1_for_ademamix_match = 1.0 - (beta_s ** schedule_step)
+                # bias_correction1_for_ademamix_match = max(bias_correction1_for_ademamix_match, eps)
+
+                # alpha1 = 1.0 / bias_correction1_for_ademamix_match
+                # alpha2 = linear_warmup_scheduler(
+                #         schedule_step,
+                #         alpha_end=8.0,
+                #         alpha_start=0,
+                #         warmup=16000,
+                #         )
+                ####################################################
                 self.last_alpha1 = alpha1
 
                 if log_dict is not None:
@@ -641,14 +889,40 @@ class GenTwoPlaneMoMo(Optimizer):
                     log_dict[f"{prefix}/alpha2"] = float(alpha2)
                     log_dict[f"{prefix}/final_denom"] = float(final_denom)
                     log_dict[f"{prefix}/alpha1_unclipped"] = float(alpha1_unc)
-                    log_dict[f"{prefix}/||m_t^{(1)}||_{2}^{2}"] = float(logged_mom_vec_1_squared_norm)
-                    log_dict[f"{prefix}/||m_t^{(2)}||_{2}^{2}"] = float(logged_mom_vec_2_squared_norm)
+                    log_dict[prefix + "/||m_t^{(1)}||_{2}^{2}"] = float(logged_mom_vec_1_squared_norm)
+                    log_dict[prefix + "/||m_t^{(2)}||_{2}^{2}"] = float(logged_mom_vec_2_squared_norm)
                     log_dict[f"{prefix}/<m_t^(1), m_t^(2)>"] = float(logged_mom_vec1_vec2_dot_prod)
                     log_dict[f"{prefix}/<g_t, m_t^(1)>"] = float(logged_grad_m1_dot_prod)
                     log_dict[f"{prefix}/<g_t, m_t^(2)>"] = float(logged_grad_m2_dot_prod)
 
+                    log_dict[f"{prefix}/corrected_denom"] = float(corrected_denom)  
+                    log_dict[f"{prefix}/b1_minus_b2"] = float(b1 - b2)  
+
+                    log_dict[f"{prefix}/final_numer"] = float(final_numer)  
+                    log_dict[f"{prefix}/numer_term_A_num_fac_times_b_gap"] = float(numer_term_A_num_fac_times_b_gap)  
+                    log_dict[f"{prefix}/numer_term_B_mu_times_m1_minus_m2_dot_wt"] = float(numer_term_B_mu_times_m1_minus_m2_dot_wt)  
+                    log_dict[f"{prefix}/numer_term_C_m1_minus_m2_dot_Pinv_m2"] = float(numer_term_C_m1_minus_m2_dot_Pinv_m2)  
+
+                    log_dict[f"{prefix}/alpha1_unc_from_final_numer_over_corrected_denom"] = float(alpha1_unc_from_final_numer_over_corrected_denom)  
+                    log_dict[f"{prefix}/|alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom|"] = float(abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom)  
+                    log_dict[f"{prefix}/indicator_alpha1_unc_less_than_0"] = float(indicator_alpha1_unc_less_than_0)  
+                    log_dict[f"{prefix}/indicator_alpha1_unc_greater_than_1"] = float(indicator_alpha1_unc_greater_than_1)  
+                    log_dict[f"{prefix}/indicator_final_denom_raw_less_than_eps"] = float(indicator_final_denom_raw_less_than_eps)  
+
+                    log_dict[prefix + "/||g_t||_{2}^{2}"] = float(logged_grad_squared_norm)  
+                    log_dict[prefix + "/||m_t^{(1)}-m_t^{(2)}||_{2}^{2}"] = float(logged_m1_minus_m2_squared_norm)  
+                    log_dict[f"{prefix}/cos_sim(m_t^(1), m_t^(2))"] = float(cos_sim_m_t1_m_t2)  
+                    log_dict[f"{prefix}/cos_sim(g_t, m_t^(1))"] = float(cos_sim_g_t_m_t1)  
+                    log_dict[f"{prefix}/cos_sim(g_t, m_t^(2))"] = float(cos_sim_g_t_m_t2)  
+
+                    if precond == "adam":  
+                        log_dict[f"{prefix}/pinv_diag_entry_mean"] = float(pinv_diag_entry_mean)  
+                        log_dict[f"{prefix}/pinv_diag_entry_max"] = float(pinv_diag_entry_max)  
+                        log_dict[prefix + "/||P_t^{-1} m_t^(2)||_{2}^{2}"] = float(pinv_m2_squared_norm)  
+                        log_dict[prefix + "/||P_t^{-1} (m_t^(1)-m_t^(2))||_{2}^{2}"] = float(pinv_m1_minus_m2_squared_norm)  
+
                 # convex-combo momentum m = alpha1*m1 + alpha2*m2
-                mom_vec_cvx_combo = alpha1 * m1 + alpha2 * m2
+                mom_vec_cvx_combo = alpha1 * m1_for_update + alpha2 * m2
 
                 # apply preconditioner as Pinv
                 if precond == "adam":
@@ -662,21 +936,48 @@ class GenTwoPlaneMoMo(Optimizer):
                 # Decoupled weight decay (AdamW): apply decay directly to the parameters!
                 # then apply the preconditioned momentum step w/ no proximal shrinkage factor
                 if decoupled_wd:
+                    p_old = p.detach().float()  
+                    # w_{t+1} = (1 - lr*mu) w_t - lr*step_dir  ==>  w_{t+1} - w_t = -lr*mu*w_t - lr*step_dir  
+                    w_t_plus_1_minus_w_t = (-lr * mu) * p_old - lr * step_dir.detach().float()  
+                    m_t_1_dot_w_t_plus_1_minus_w_t = torch.dot(m1_for_update.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+                    m_t_2_dot_w_t_plus_1_minus_w_t = torch.dot(m2.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+
                     if mu != 0.0:
                         p.add_(p, alpha=-lr * mu)
                     p.add_(step_dir.to(p.dtype), alpha=-lr)
                 else:
+                    p_old = p.detach().float()  
+                    denom_for_dw = (1.0 + lr * mu)  
+                    shrink = (1.0 / denom_for_dw)  
+                    scale = (lr / denom_for_dw)  
+                    w_t_plus_1_minus_w_t = (shrink - 1.0) * p_old - scale * step_dir.detach().float()  
+                    m_t_1_dot_w_t_plus_1_minus_w_t = torch.dot(m1_for_update.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+                    m_t_2_dot_w_t_plus_1_minus_w_t = torch.dot(m2.detach().float().flatten(), w_t_plus_1_minus_w_t.flatten()).item()  
+
                     # The new step for the optimizer: proximal coupled weight decay step
                     # w_{t+1} = (1/(1+ (eta * mu))) w_t - (η/(1+(eta * mu))) Pinv( alpha1*m1 + (1-alpha1)*m2 )
                     denom = (1.0 + lr * mu)
                     p.mul_(1.0 / denom)
                     p.add_(step_dir.to(p.dtype), alpha=-lr / denom)
 
+                ell_t_1_of_w_t_plus_1 = b1 + m_t_1_dot_w_t_plus_1_minus_w_t  
+                ell_t_2_of_w_t_plus_1 = b2 + m_t_2_dot_w_t_plus_1_minus_w_t  
+                ell_t_1_of_w_t_plus_1_minus_ell_t_2_of_w_t_plus_1 = ell_t_1_of_w_t_plus_1 - ell_t_2_of_w_t_plus_1  
+
+                if log_dict is not None:  
+                    prefix = f"two_plane_momo/group_{group_idx}/parameter_{param_log_idx}"  
+                    log_dict[prefix + "/ell_t^(1)(w_{t+1})"] = float(ell_t_1_of_w_t_plus_1)  
+                    log_dict[prefix + "/ell_t^(2)(w_{t+1})"] = float(ell_t_2_of_w_t_plus_1)  
+                    log_dict[prefix + "/ell_t^(1)(w_{t+1})-ell_t^(2)(w_{t+1})"] = float(ell_t_1_of_w_t_plus_1_minus_ell_t_2_of_w_t_plus_1)  
+                    log_dict[prefix + "/<m_t^(1), w_{t+1}-w_t>"] = float(m_t_1_dot_w_t_plus_1_minus_w_t)  
+                    log_dict[prefix + "/<m_t^(2), w_{t+1}-w_t>"] = float(m_t_2_dot_w_t_plus_1_minus_w_t) 
+
                 # write back gamma1 and gamma2 to "state", since each gamma_j here is computed per-parameter
                 # Unlike barf_j, which has only a global meaning, hence it is not written to "state"
                 state["gamma1"] = gamma1
                 state["gamma2"] = gamma2
-                state["tp_step"] = tp_step + 1
+                # state["tp_step"] = tp_step + 1
+                state["tp_step"] = tp_step # To match AdEMAMix which uses pre-increment timeline
                 param_log_idx += 1
 
         # write back barf1, barf2 to "self.param_groups[0]" --- the shared global loss-EMA state we designated --- exactly once
@@ -689,7 +990,9 @@ class GenTwoPlaneMoMo(Optimizer):
             group["tp_barf2"] = shared_barf2
 
         # Since we are using param_groups[0] as the "global owner" of shared loss-EMA, scheduler state, we have to maintain the same global tp_step across all parameter groups for consistentcy and for resume correctness.
-        next_global_step = shared_group["tp_step"] + 1
+        # next_global_step = shared_group["tp_step"] + 1
+        next_global_step = global_beta_step # To match AdEMAMix which uses pre-increment timeline
+
         for group in self.param_groups:
             group["tp_step"] = next_global_step
         return None
