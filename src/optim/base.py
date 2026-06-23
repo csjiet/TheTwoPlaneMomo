@@ -219,6 +219,10 @@ def train(
             opt.step(bs=cfg.sophia_bs * cfg.sequence_length)
         elif cfg.opt == "gen_two_plane_momo":
             opt.step(loss_for_momo, wandb_optimizer_logs)
+        elif cfg.opt == "gen_three_plane_momo":
+            opt.step(loss_for_momo, wandb_optimizer_logs)
+        elif cfg.opt == "gen_three_nesterov_plane_momo":
+            opt.step(loss_for_momo, wandb_optimizer_logs)
         else:
             opt.step()
 

@@ -89,6 +89,8 @@ def parse_args(base_parser, args, namespace):
             "soap",
             "ademamix",
             "gen_two_plane_momo",
+            "gen_three_plane_momo",
+            "gen_three_nesterov_plane_momo",
             "lion",
             "sf-adamw",
             "sf-sgd",
@@ -152,6 +154,29 @@ def parse_args(base_parser, args, namespace):
             choices=["parameter", "network"],
             type=str,
             )
+
+    parser.add_argument("--g_t3p_momo_beta_short", default=0.9, type=float)
+    parser.add_argument("--g_t3p_momo_beta_long", default=0.999, type=float)
+    parser.add_argument( "--g_t3p_momo_beta_long_start", default=0.5, type=float)
+    parser.add_argument( "--g_t3p_momo_beta_long_warmup_steps", default=None, type=int)
+    parser.add_argument("--g_t3p_momo_eps", default=1e-12, type=float)
+    parser.add_argument("--g_t3p_momo_clip_alpha", default=True, type=bool)
+    parser.add_argument("--g_t3p_momo_use_loss_ema", action="store_true")
+    parser.add_argument("--no-g_t3p_momo_use_loss_ema", dest="g_t3p_momo_use_loss_ema", action="store_false")
+    parser.add_argument("--g_t3p_momo_alpha_denom_correction", default=0.0, type=float)
+    parser.set_defaults(g_t3p_momo_use_loss_ema=True)
+    parser.add_argument("--g_t3p_momo_preconditioner", default="identity", type=str)
+    parser.add_argument("--g_t3p_momo_precond_beta2", default=0.999, type=float)
+    parser.add_argument("--g_t3p_momo_weight_decay_factor", default=0.0, type=float)
+    parser.add_argument("--g_t3p_momo_eps_precond", default=1e-12, type=float)
+    parser.add_argument("--g_t3p_momo_decoupled_weight_decay", action="store_true")
+    parser.add_argument(
+            "--g_t3p_momo_alpha_scope",
+            default="network",
+            choices=["parameter", "network"],
+            type=str,
+            )
+    parser.add_argument("--g_t3p_momo_fstar", default=3.0, type=float)
 
     parser.add_argument("--schedulefree_r", default=0.0, type=float)
     parser.add_argument("--weight_lr_power", default=2.0, type=float)

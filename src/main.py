@@ -32,6 +32,8 @@ from optim.soap import SOAP
 from optim.sophia import SophiaG
 
 from optim.gen_two_plane_momo import GenTwoPlaneMoMo
+from optim.gen_three_plane_momo import GenThreePlaneMoMo
+from optim.gen_three_nesterov_plane_momo import GenThreeNesterovPlaneMoMo
 
 def get_args():
     parser = argparse.ArgumentParser(allow_abbrev=False)
@@ -92,6 +94,8 @@ def main(args, parser):
         #     wandb.define_metric("two_plane_momo/*", step_metric="iter")
         if args.opt in ("gen_two_plane_momo", "two_plane_momo"):
             wandb.define_metric("two_plane_momo/*", step_metric="iter")
+        if args.opt in ("gen_three_plane_momo", "three_plane_momo","gen_three_nesterov_plane_momo"):
+            wandb.define_metric("three_plane_momo/*", step_metric="iter")
 
 
     print(f"Starting Experiment: {exp_name}")
@@ -254,6 +258,46 @@ def main(args, parser):
             eps_precond=args.g_tp_momo_eps_precond,
             decoupled_weight_decay=args.g_tp_momo_decoupled_weight_decay,
             alpha_scope=args.g_tp_momo_alpha_scope,
+        )
+    elif args.opt == "gen_three_plane_momo":
+        opt = GenThreePlaneMoMo(
+            group_specs,
+            lr=args.lr,
+            beta_short=args.g_t3p_momo_beta_short,
+            beta_long=args.g_t3p_momo_beta_long,
+            beta_long_start=args.g_t3p_momo_beta_long_start,
+            beta_long_warmup_steps=args.g_t3p_momo_beta_long_warmup_steps,
+            eps=args.g_t3p_momo_eps,
+            clip_alpha=args.g_t3p_momo_clip_alpha,
+            use_loss_ema=args.g_t3p_momo_use_loss_ema,
+            alpha_denom_correction=args.g_t3p_momo_alpha_denom_correction,
+            preconditioner=args.g_t3p_momo_preconditioner,
+            precond_beta2=args.g_t3p_momo_precond_beta2,
+            weight_decay_factor=args.g_t3p_momo_weight_decay_factor,
+            eps_precond=args.g_t3p_momo_eps_precond,
+            decoupled_weight_decay=args.g_t3p_momo_decoupled_weight_decay,
+            alpha_scope=args.g_t3p_momo_alpha_scope,
+            fstar = args.g_t3p_momo_fstar,
+        )
+    elif args.opt == "gen_three_nesterov_plane_momo":
+        opt = GenThreeNesterovPlaneMoMo(
+            group_specs,
+            lr=args.lr,
+            beta_short=args.g_t3p_momo_beta_short,
+            beta_long=args.g_t3p_momo_beta_long,
+            beta_long_start=args.g_t3p_momo_beta_long_start,
+            beta_long_warmup_steps=args.g_t3p_momo_beta_long_warmup_steps,
+            eps=args.g_t3p_momo_eps,
+            clip_alpha=args.g_t3p_momo_clip_alpha,
+            use_loss_ema=args.g_t3p_momo_use_loss_ema,
+            alpha_denom_correction=args.g_t3p_momo_alpha_denom_correction,
+            preconditioner=args.g_t3p_momo_preconditioner,
+            precond_beta2=args.g_t3p_momo_precond_beta2,
+            weight_decay_factor=args.g_t3p_momo_weight_decay_factor,
+            eps_precond=args.g_t3p_momo_eps_precond,
+            decoupled_weight_decay=args.g_t3p_momo_decoupled_weight_decay,
+            alpha_scope=args.g_t3p_momo_alpha_scope,
+            fstar = args.g_t3p_momo_fstar,
         )
     elif args.opt == "lion":
         opt = Lion(
@@ -563,6 +607,19 @@ def get_exp_name(
         "g_tp_momo_eps_precond", 
         "g_tp_momo_decoupled_weight_decay",
         "g_tp_momo_alpha_scope", 
+
+        "g_t3p_momo_beta_short",
+        "g_t3p_momo_beta_long",
+        "g_t3p_momo_eps",
+        "g_t3p_momo_clip_alpha",
+        "g_t3p_momo_use_loss_ema",
+        "g_t3p_momo_preconditioner",
+        "g_t3p_momo_precond_beta2",
+        "g_t3p_momo_weight_decay_factor",
+        "g_t3p_momo_eps_precond",
+        "g_t3p_momo_decoupled_weight_decay",
+        "g_t3p_momo_alpha_scope",
+        "g_t3p_momo_fstar",
         "plot_router_logits",
         "weight_average",
         # "wa_interval",

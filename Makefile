@@ -8,13 +8,17 @@
 	g_tp_momo_alpha_per_param_warmup_and_alpha_denom_correction2 \
 	g_tp_momo_alpha_per_param_warmup_large_lr \
 	g_tp_momo_alpha_network_warmup_large_lr \
+	g_t3p_momo_alpha_network_warmup_large_lr \
+	decoupled_wd_g_t3p_momo_alpha_network_warmup_large_lr \
+	decoupled_wd_g_t3p_nesterov_momo_alpha_network_warmup_large_lr \
 	med_soap med_adamw med_mars med_ademamix med_tp_momo med_tp_momo2 \
 	small_soap small_sgd small_adamw small_ademamix
 
 WANDB_PROJECT    ?= AdEMAMIX_adaptive
 WANDB_RUN_PREFIX ?= ori_llama
 WANDB_ENTITY     ?= tbal
-RUN_TAG          ?= minmax_norma_w_bias_corr_decoup_wd_expr1_16k
+RUN_TAG          ?= test_t3p_momo
+#minmax_norma_w_bias_corr_decoup_wd_expr1_16k
 # test_consistency_tpmomo_adema_expr1_16k
 # decoupled_wd_large_lr_expr1_16k
 #per_param_alpha_lb_var_big_lr_expr1_16k
@@ -434,6 +438,56 @@ g_tp_momo_alpha_network_warmup_large_lr:
 		--g_tp_momo_use_loss_ema \
 		--g_tp_momo_alpha_denom_correction 0.0 \
 		--g_tp_momo_alpha_scope network \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+decoupled_wd_g_t3p_momo_alpha_network_warmup_large_lr:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_three_plane_momo --lr 5e-3 --scheduler cos \
+		--g_t3p_momo_beta_short 0.9 --g_t3p_momo_beta_long 0.999 \
+		--g_t3p_momo_beta_long_start 0.9 \
+		--g_t3p_momo_beta_long_warmup_steps 16000 \
+		--g_t3p_momo_eps 1e-12 \
+		--g_t3p_momo_preconditioner adam \
+		--g_t3p_momo_precond_beta2 0.999 \
+		--g_t3p_momo_weight_decay_factor $(WEIGHT_DECAY) \
+    --g_t3p_momo_decoupled_weight_decay \
+		$(COMMON_ARGS) \
+		--g_t3p_momo_use_loss_ema \
+		--g_t3p_momo_alpha_denom_correction 0.0 \
+		--g_t3p_momo_alpha_scope network \
+		--g_t3p_momo_fstar 3.0 \
+		--eval_interval 115 --latest_ckpt_interval 1000
+
+decoupled_wd_g_t3p_nesterov_momo_alpha_network_warmup_large_lr:
+	mkdir -p $(RESULTS_BASE)
+	$(LAUNCH) ./src/main.py --config_format base --model llama $(DIST_BACKEND_FLAG) --device $(DEVICE) \
+		--run_prefix "$(RUN_TAG)" \
+		--datasets_dir "$(DATASETS_DIR)" \
+		--n_embd $(N_EMBD) --n_head 12 --n_layer 12 \
+		--batch_size $(BATCH_SIZE) --sequence_length 512 --acc_steps 4 \
+		--dataset $(DATASET) --iterations $(ITERATIONS) \
+		--dropout 0.0 --warmup_steps 2000 --grad_clip 0.5 --seed 0 \
+		--opt gen_three_nesterov_plane_momo --lr 5e-3 --scheduler cos \
+		--g_t3p_momo_beta_short 0.9 --g_t3p_momo_beta_long 0.9 \
+		--g_t3p_momo_beta_long_start 0.9 \
+		--g_t3p_momo_beta_long_warmup_steps 16000 \
+		--g_t3p_momo_eps 1e-12 \
+		--g_t3p_momo_preconditioner adam \
+		--g_t3p_momo_precond_beta2 0.999 \
+		--g_t3p_momo_weight_decay_factor $(WEIGHT_DECAY) \
+    --g_t3p_momo_decoupled_weight_decay \
+		$(COMMON_ARGS) \
+		--g_t3p_momo_use_loss_ema \
+		--g_t3p_momo_alpha_denom_correction 0.0 \
+		--g_t3p_momo_alpha_scope network \
+		--g_t3p_momo_fstar 3.0 \
 		--eval_interval 115 --latest_ckpt_interval 1000
 
 # Medium experiment variants

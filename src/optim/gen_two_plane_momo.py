@@ -422,12 +422,14 @@ class GenTwoPlaneMoMo(Optimizer):
         final_numer = numer_term_A_num_fac_times_b_gap - numer_term_B_mu_times_m1_minus_m2_dot_wt - numer_term_C_m1_minus_m2_dot_Pinv_m2  
 
         alpha1_unc_from_final_numer_over_corrected_denom = final_numer / corrected_denom if corrected_denom > 0.0 else 0.0  
+
+        eps_cos = 1e-12
+
+        # wandb logging
         abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom = abs(alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom)  
         indicator_alpha1_unc_less_than_0 = float(alpha1_unc < 0.0)  
         indicator_alpha1_unc_greater_than_1 = float(alpha1_unc > 1.0)  
         indicator_final_denom_raw_less_than_eps = float(final_denom < eps)  
-
-        eps_cos = 1e-12  
         cos_sim_m_t1_m_t2 = logged_mom_vec1_vec2_dot_prod / ((logged_mom_vec_1_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
         cos_sim_g_t_m_t1 = logged_grad_m1_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_1_squared_norm**0.5) + eps_cos)  
         cos_sim_g_t_m_t2 = logged_grad_m2_dot_prod / ((logged_grad_squared_norm**0.5) * (logged_mom_vec_2_squared_norm**0.5) + eps_cos)  
