@@ -62,7 +62,9 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         eps_precond: float = 1e-12,
         decoupled_weight_decay: bool = False,
         alpha_scope: str = "network",
-        fstar: float = 3,
+        fstar: float = 3.0,
+        rho_reliability: float = 0.99,
+        reliability_lambda: float = 1.0, # 1.0 turns on reliability reward and penalization
     ):
         if lr <= 0:
             raise ValueError("lr must be > 0")
@@ -88,6 +90,10 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             raise ValueError("beta_long_start in [0,1)")
         if beta_long_warmup_steps is not None and beta_long_warmup_steps < 1:
             raise ValueError("beta_long_warmup must be >= 1 or None")
+        if not (0.0 <= rho_reliability < 1.0):
+            raise ValueError("rho_reliability must be in [0,1)")
+        if reliability_lambda < 0:
+            raise ValueError("reliability_lambda must be non-negative")
 
         defaults = dict(
             lr=lr,
@@ -106,13 +112,15 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             tp_clip_alpha=clip_alpha,
             tp_use_loss_ema=use_loss_ema,
             alpha_denom_correction = alpha_denom_correction,
+            rho_reliability=rho_reliability,
+            reliability_lambda=reliability_lambda,
         )
 
         super().__init__(params, defaults)
 
         for g in self.param_groups:
-            g["tp_barf1"] = 1.0
-            g["tp_gamma1"] = 1.0
+            g["tp_barf1"] = 0.0
+            g["tp_gamma1"] = 0.0
             # g["tp_barf2"] = 1.0
             ###########################################
             # Temporary: Trying to inject Nesterov to the second plane!! (comment the line below, uncomment above)
@@ -123,9 +131,15 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             # Temporary: Trying to inject Nesterov to the second plane!! (comment the line below, uncomment above)
             ###########################################
             g["tp_gamma2"] = 0.0
-            #add
             g["tp_barf2_gs"] = 0.0
             g["tp_gamma2_gs"] = 0.0
+
+            g["tp_reliability_ema1"] = 0.0
+            g["tp_reliability_ema2"] = 0.0
+
+            g["tp_prev_intercept1"] = 0.0
+            g["tp_prev_intercept2"] = 0.0
+            g["tp_reliability_initialized"] = False
 
             g["tp_step"] = 0
             g.setdefault("tp_clip_alpha", clip_alpha)
@@ -138,6 +152,9 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             g.setdefault("decoupled_weight_decay", decoupled_weight_decay)
             g.setdefault("alpha_scope", alpha_scope)
             g.setdefault("fstar", fstar)
+
+            g.setdefault("rho_reliability", rho_reliability)
+            g.setdefault("reliability_lambda", reliability_lambda)
 
         self.last_alpha1: Optional[float] = None
 
@@ -161,6 +178,9 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         beta_l_final = self.param_groups[0]["beta_long"]
         beta_l_start = self.param_groups[0]["beta_long_start"]
         beta_l_warmup_steps = self.param_groups[0]["beta_long_warmup_steps"]
+
+        rho_reliability = self.param_groups[0]["rho_reliability"]
+        reliability_lambda = self.param_groups[0]["reliability_lambda"]
         eps = self.param_groups[0]["eps"]
         eps_precond = self.param_groups[0]["eps_precond"]
         precond = self.param_groups[0]["preconditioner"]
@@ -171,26 +191,35 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         barf2 = g["tp_barf2"]
         gamma1 = g["tp_gamma1"]
         gamma2 = g["tp_gamma2"]
-        #add
+
         barf2_gs = g["tp_barf2_gs"]
         gamma2_gs = g["tp_gamma2_gs"]
+
+        reliability_ema1 = g["tp_reliability_ema1"]
+        reliability_ema2 = g["tp_reliability_ema2"]
+
+        prev_intercept1 = g["tp_prev_intercept1"]
+        prev_intercept2 = g["tp_prev_intercept2"]
+        reliability_initialized = g["tp_reliability_initialized"]
         clip_alpha = g["tp_clip_alpha"]
         use_loss_ema = g["tp_use_loss_ema"]
         alpha_denom_correction = g["alpha_denom_correction"]
         stored_tp_step = g["tp_step"]
         tp_step = stored_tp_step + 1 # To match AdEMAMix which uses pre-increment timeline
 
-        #add
-        # Sync optimizer-wide scalar state from param_groups[0] to all other groups.
-        # These are network-wide scalars, not true per-group hyperparameters.
+        # sync optimizer-wide scalar state from param_groups[0] to all other groups
         for group in self.param_groups[1:]:
             group["tp_barf1"] = barf1
             group["tp_barf2"] = barf2
             group["tp_gamma1"] = gamma1
             group["tp_gamma2"] = gamma2
-            #add
             group["tp_barf2_gs"] = barf2_gs
             group["tp_gamma2_gs"] = gamma2_gs
+            group["tp_reliability_ema1"] = reliability_ema1
+            group["tp_reliability_ema2"] = reliability_ema2
+            group["tp_prev_intercept1"] = prev_intercept1
+            group["tp_prev_intercept2"] = prev_intercept2
+            group["tp_reliability_initialized"] = reliability_initialized
             group["tp_step"] = stored_tp_step
 
         if beta_l_warmup_steps is not None:
@@ -203,13 +232,16 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         else:
             beta_l = beta_l_final
 
-        #add
-        nesterov_decay = (2.0 * beta_l) - (beta_l * beta_l)
-        nesterov_new_weight = 1.0 - beta_l
+        # Flipped weights v1: slow
+        # nesterov_decay = (2.0 * beta_l) - (beta_l * beta_l)
+        # nesterov_new_weight = 1.0 - beta_l
+
+        # Flipped weights v2: reactive
+        nesterov_decay = (1.0 - beta_l) + (beta_l * beta_l)
+        nesterov_new_weight = beta_l
 
         if log_dict is not None:
             log_dict["three_plane_momo/beta_long_used"] = float(beta_l)
-            #add
             log_dict["three_plane_momo/nesterov_decay_used"] = float(nesterov_decay)
             log_dict["three_plane_momo/nesterov_new_weight_used"] = float(nesterov_new_weight)
 
@@ -226,6 +258,10 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                 raise ValueError("All parameter groups must share the same beta_long_start for network-wide GenThreePlaneMoMo.")
             if group["beta_long_warmup_steps"] != beta_l_warmup_steps:
                 raise ValueError("All parameter groups must share the same beta_long_warmup_steps for network-wide GenThreePlaneMoMo.")
+            if group["rho_reliability"] != rho_reliability:
+                raise ValueError("All parameter groups must share the same rho_reliability for network-wide GenThreePlaneMoMo.")
+            if group["reliability_lambda"] != reliability_lambda:
+                raise ValueError("All parameter groups must share the same reliability_lambda for network-wide GenThreePlaneMoMo.")
             if group["eps"] != eps:
                 raise ValueError("All parameter groups must share the same eps for network-wide GenThreePlaneMoMo.")
             if group["eps_precond"] != eps_precond:
@@ -294,6 +330,9 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         m2_dot_w_t = 0.0
         g_t_dot_w_t = 0.0
 
+        prev_m1_dot_w_t_for_reliability = 0.0
+        prev_m2_dot_w_t_for_reliability = 0.0
+
         # For: "lambda_1,unc" with preconditioner (P_t^{-1})
         denom_m1_m2_precond_inv_m1_m2 = 0.0 # (m1-m2)^T Pinv (m1-m2)
         numer_m1_m2_precond_inv_m2 = 0.0 # (m1-m2)^T Pinv m2
@@ -316,7 +355,7 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                     state["m1"] = torch.zeros_like(p, dtype=torch.float32, memory_format=torch.preserve_format)
                 if "m2" not in state:
                     state["m2"] = torch.zeros_like(p, dtype=torch.float32, memory_format=torch.preserve_format)
-                #add
+
                 if "m2_gs" not in state:
                     state["m2_gs"] = 0.0
                 if precond == "adam" and "v_t" not in state:
@@ -326,17 +365,40 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                 m1 = state["m1"]  # m_t^{(1)}
                 m2 = state["m2"]  # m_t^{(2)}
 
+                # pred reliability: uses the previous-step planes evaluated at the current iterate w_t
+                # computed before updating m1 and m2 with the current gradient
+                w_t_for_reliability = p.detach().float()
+
+                # prev_m1_for_reliability = m1 
+                ####################################################
+                # Temporary: Potentially consider bias correction to momentum 1.
+                prev_m1_for_reliability = m1
+                ####################################################
+                prev_m2_for_reliability = m2 / max(state["m2_gs"], eps)
+                prev_m1_dot_w_t_for_reliability += torch.dot(prev_m1_for_reliability.flatten(), w_t_for_reliability.flatten()).item()
+                prev_m2_dot_w_t_for_reliability += torch.dot(prev_m2_for_reliability.flatten(), w_t_for_reliability.flatten()).item()
+
                 # two EMAs of the gradient
-                m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
+                # m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
+                # m2.mul_(nesterov_decay).add_(grad, alpha=nesterov_new_weight)
+                # state["m2_gs"] = (nesterov_decay * state["m2_gs"]) + nesterov_new_weight
+                if stored_tp_step == 0:
+                    m1.copy_(grad)
+                    m2.copy_(grad)
+                    state["m2_gs"] = 1.0
+                else:
+                    m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
+                    m2.mul_(nesterov_decay).add_(grad, alpha=nesterov_new_weight)
+                    state["m2_gs"] = (nesterov_decay * state["m2_gs"]) + nesterov_new_weight
                 # m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)  # m_t^{(2)} = \Beta_long m_{t-1}^{(2)} + (1 - \Beta_long) g_t
-                m2.mul_(nesterov_decay).add_(grad, alpha=nesterov_new_weight)
-                state["m2_gs"] = (nesterov_decay * state["m2_gs"]) + nesterov_new_weight
                 m2_nesterov = m2 / max(state["m2_gs"], eps)
 
                 # m1_for_update = m1
                 ####################################################
                 # Temporary: Potentially consider bias correction to momentum 1.
-                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                #modify
+                # m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                m1_for_update = m1
                 ####################################################
 
                 # For: lambda_unc, and w_{t+1}
@@ -352,6 +414,9 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                     # precond_t_inv_flattened = (P_t^{-1}_{1,1}, ..., P_t^{-1}_{n,n})
                     v_t_hat = v_t / bias_correction_denom # \hat{v_t}
                     precond_t_inv_flattened = v_t_hat.sqrt().add_(eps_precond).reciprocal()
+                    pinv_diag_entry_sum += precond_t_inv_flattened.sum().item()
+                    pinv_diag_entry_max = max(pinv_diag_entry_max, precond_t_inv_flattened.max().item())
+                    pinv_diag_entry_count += precond_t_inv_flattened.numel()
                     # pinv_m2_squared_norm += torch.dot((precond_t_inv_flattened * m2).flatten(), (precond_t_inv_flattened * m2).flatten()).item()  
                     pinv_m2_squared_norm += torch.dot((precond_t_inv_flattened * m2_nesterov).flatten(), (precond_t_inv_flattened * m2_nesterov).flatten()).item()  
                     # pinv_m1_minus_m2_squared_norm += torch.dot((precond_t_inv_flattened * (m1_for_update - m2)).flatten(), (precond_t_inv_flattened * (m1_for_update - m2)).flatten()).item()  
@@ -411,33 +476,93 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                     denom_m1_m2_precond_inv_m1_m2 += torch.dot(m1_minus_m2.flatten(), m1_minus_m2.flatten()).item()
                     numer_m1_m2_precond_inv_m2 += torch.dot(m1_minus_m2.flatten(), m2_nesterov.flatten()).item()
 
+        if use_loss_ema and reliability_initialized:
+            # prev_ell1_of_w_t_for_reliability = prev_b1 + prev_m1_dot_w_t_for_reliability
+            # prev_ell2_of_w_t_for_reliability = prev_b2 + prev_m2_dot_w_t_for_reliability
+            prev_ell1_of_w_t_for_reliability = prev_intercept1 + prev_m1_dot_w_t_for_reliability
+            prev_ell2_of_w_t_for_reliability = prev_intercept2 + prev_m2_dot_w_t_for_reliability
+            reliability_error1 = abs(loss_t - prev_ell1_of_w_t_for_reliability)
+            reliability_error2 = abs(loss_t - prev_ell2_of_w_t_for_reliability)
+            reliability_ema1 = rho_reliability * reliability_ema1 + (1.0 - rho_reliability) * reliability_error1
+            reliability_ema2 = rho_reliability * reliability_ema2 + (1.0 - rho_reliability) * reliability_error2
+        else:
+            prev_ell1_of_w_t_for_reliability = 0.0
+            prev_ell2_of_w_t_for_reliability = 0.0
+            reliability_error1 = 0.0
+            reliability_error2 = 0.0
+
         # For: lambda_1,unc --- MoMo: by first building b_t^{(1)} and b_t^{(2)} -> build lambda_1_unc.
         if use_loss_ema:
             # \bar{l}_{t}^{(1)} = \Beta_1 (\bar{l}_{t}^{(1)}) + (1 - \Beta_1) l_t
-            barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
+            # barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
             # \bar{\ell}_{t}^{(2)} = \Beta_2 (\bar{l}_{t}^{(2)}) + (1 - \Beta_2) l_t
             # barf2 = beta_l * barf2 + (1 - beta_l) * loss_t
-            barf2 = nesterov_decay * barf2 + nesterov_new_weight * loss_t
-            barf2_gs = nesterov_decay * barf2_gs + nesterov_new_weight
+            # barf2 = nesterov_decay * barf2 + nesterov_new_weight * loss_t
+            # barf2_gs = nesterov_decay * barf2_gs + nesterov_new_weight
+            if stored_tp_step == 0:
+                barf1 = loss_t
+                barf2 = loss_t
+                barf2_gs = 1.0
+            else:
+                barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
+                barf2 = nesterov_decay * barf2 + nesterov_new_weight * loss_t
+                barf2_gs = nesterov_decay * barf2_gs + nesterov_new_weight
             barf2_nesterov = barf2 / max(barf2_gs, eps)
 
         # \gamma_{t}^{(1)} (fast EMA of <g_t, w_t>)
-        gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
+        # gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
         # \gamma_{t}^{(2)} (slow EMA of <g_t, w_t>)
         # gamma2 = beta_l * gamma2 + (1 - beta_l) * g_t_dot_w_t
-        gamma2 = nesterov_decay * gamma2 + nesterov_new_weight * g_t_dot_w_t
-        gamma2_gs = nesterov_decay * gamma2_gs + nesterov_new_weight
+        # gamma2 = nesterov_decay * gamma2 + nesterov_new_weight * g_t_dot_w_t
+        # gamma2_gs = nesterov_decay * gamma2_gs + nesterov_new_weight
+        if stored_tp_step == 0:
+            gamma1 = g_t_dot_w_t
+            gamma2 = g_t_dot_w_t
+            gamma2_gs = 1.0
+        else:
+            gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
+            gamma2 = nesterov_decay * gamma2 + nesterov_new_weight * g_t_dot_w_t
+            gamma2_gs = nesterov_decay * gamma2_gs + nesterov_new_weight
         gamma2_nesterov = gamma2 / max(gamma2_gs, eps)
 
         # For: lambda_1,unc
         if use_loss_ema:
-            b1 = barf1 - gamma1 + m1_dot_w_t
+            # b1 = barf1 - gamma1 + m1_dot_w_t
             # b2 = barf2 - gamma2 + m2_dot_w_t
-            b2 = barf2_nesterov - gamma2_nesterov + m2_dot_w_t
+            # b2 = barf2_nesterov - gamma2_nesterov + m2_dot_w_t
+            current_intercept1 = barf1 - gamma1
+            current_intercept2 = barf2_nesterov - gamma2_nesterov
+            b1_raw = current_intercept1 + m1_dot_w_t
+            b2_raw = current_intercept2 + m2_dot_w_t
         else:
-            b1 = m1_dot_w_t - gamma1
+            # b1 = m1_dot_w_t - gamma1
             # b2 = m2_dot_w_t - gamma2
-            b2 = m2_dot_w_t - gamma2_nesterov
+            # b2 = m2_dot_w_t - gamma2_nesterov
+            current_intercept1 = -gamma1
+            current_intercept2 = -gamma2_nesterov
+            b1_raw = current_intercept1 + m1_dot_w_t
+            b2_raw = current_intercept2 + m2_dot_w_t
+
+        # Prediction-reliability-adjusted plane heights.
+        # To recover the previous version, set reliability_lambda=0.0 or comment out these two lines and use b1=b1_raw, b2=b2_raw.
+        reliability_ema_avg = 0.5 * (reliability_ema1 + reliability_ema2)
+        if reliability_lambda > 0.0:
+            reliability_centered_adjustment1 = reliability_lambda * (reliability_ema1 - reliability_ema_avg)
+            reliability_centered_adjustment2 = reliability_lambda * (reliability_ema2 - reliability_ema_avg)
+            b1 = b1_raw - reliability_centered_adjustment1
+            b2 = b2_raw - reliability_centered_adjustment2
+        else:
+            reliability_centered_adjustment1 = 0.0
+            reliability_centered_adjustment2 = 0.0
+            b1 = b1_raw
+            b2 = b2_raw
+        # store the intercepts, not b_i.  The next reliability check evaluates
+        # ell_t^{(i)}(w_{t+1/current}) = intercept_t^{(i)} + <m_t^{(i)}, w_{next/current}>.
+        # prev_b1 = b1_raw
+        # prev_b2 = b2_raw
+        prev_intercept1 = current_intercept1
+        prev_intercept2 = current_intercept2
+        reliability_initialized = True
 
         # Remove this! Doesn't make MoMo sense. But we try: Force b1 and b2 (this might not make theoretical sense. But makes empirical sense)
         # b1 = b2
@@ -448,13 +573,27 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             log_dict["three_plane_momo/network/barf2"] = float(barf2)
             log_dict["three_plane_momo/network/gamma1"] = float(gamma1)
             log_dict["three_plane_momo/network/gamma2"] = float(gamma2)
-            #add
             log_dict["three_plane_momo/network/barf2_gs"] = float(barf2_gs)
             log_dict["three_plane_momo/network/gamma2_gs"] = float(gamma2_gs)
             log_dict["three_plane_momo/network/barf2_nesterov_corrected"] = float(barf2_nesterov) if use_loss_ema else 0.0
             log_dict["three_plane_momo/network/gamma2_nesterov_corrected"] = float(gamma2_nesterov)
             log_dict["three_plane_momo/network/b1"] = float(b1)
             log_dict["three_plane_momo/network/b2"] = float(b2)
+            log_dict["three_plane_momo/network/b1_raw_before_reliability_adjustment"] = float(b1_raw)
+            log_dict["three_plane_momo/network/b2_raw_before_reliability_adjustment"] = float(b2_raw)
+            log_dict["three_plane_momo/network/reliability_ema1"] = float(reliability_ema1)
+            log_dict["three_plane_momo/network/reliability_ema2"] = float(reliability_ema2)
+            log_dict["three_plane_momo/network/reliability_error1"] = float(reliability_error1)
+            log_dict["three_plane_momo/network/reliability_error2"] = float(reliability_error2)
+            log_dict["three_plane_momo/network/reliability_lambda"] = float(reliability_lambda)
+            log_dict["three_plane_momo/network/rho_reliability"] = float(rho_reliability)
+            log_dict["three_plane_momo/network/prev_ell1_of_w_t_for_reliability"] = float(prev_ell1_of_w_t_for_reliability)
+            log_dict["three_plane_momo/network/prev_ell2_of_w_t_for_reliability"] = float(prev_ell2_of_w_t_for_reliability)
+            log_dict["three_plane_momo/network/reliability_ema_avg"] = float(reliability_ema_avg)
+            log_dict["three_plane_momo/network/reliability_centered_adjustment1"] = float(reliability_centered_adjustment1)
+            log_dict["three_plane_momo/network/reliability_centered_adjustment2"] = float(reliability_centered_adjustment2)
+            log_dict["three_plane_momo/network/reliability_adjustment1"] = float(reliability_centered_adjustment1)
+            log_dict["three_plane_momo/network/reliability_adjustment2"] = float(reliability_centered_adjustment2)
             log_dict["three_plane_momo/network/<m_t^(1), w_t>"] = float(m1_dot_w_t)  
             log_dict["three_plane_momo/network/<m_t^(2), w_t>"] = float(m2_dot_w_t)  
             log_dict["three_plane_momo/network/<m_t^(1), w_t>-<m_t^(2), w_t>"] = float(m1_dot_w_t - m2_dot_w_t)  
@@ -468,10 +607,7 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         # Constrained lambda_{1,unc} -> lambda_{1} CLIPPED!
         alpha_max = 1.0
         alpha_min = 0.0
-        #add
-        # For the three-plane simplex subproblem, this projection is mathematically required.
-        # The stored tp_clip_alpha flag is kept for compatibility with older two-plane experiments,
-        # but the projected edge candidates must always lie on the simplex edges.
+        # For our three-plane simplex subproblem, projection is required, the projected edge candidates must always lie on the simplex edges
 
 
         # Compute all terms required for the 3 candidate dual function 
@@ -484,7 +620,6 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         cand_A_final_denom = denom_m1_precond_inv_m1
         cand_A_corrected_denom = max(cand_A_final_denom, eps) + alpha_denom_correction
         # Unconstrained alpha/ lambda
-        #add
         # Degenerate edge: objective is linear/constant, so the projected maximizer is an endpoint
         if cand_A_final_denom <= eps:
             cand_A_alpha1_unc = 1.0 if cand_A_final_numer >= 0.0 else 0.0
@@ -507,7 +642,6 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
         cand_B_final_denom = denom_m2_precond_inv_m2
         cand_B_corrected_denom = max(cand_B_final_denom, eps) + alpha_denom_correction
         # Unconstrained alpha/ lambda
-        #add
         # Degenerate edge: objective is linear/constant, so the projected maximizer is an endpoint
         if cand_B_final_denom <= eps:
             cand_B_alpha2_unc = 1.0 if cand_B_final_numer >= 0.0 else 0.0
@@ -840,11 +974,12 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             log_dict["three_plane_momo/network/<g_t, m_t^(2)>"] = float(logged_grad_m2_dot_prod)
             log_dict["three_plane_momo/network/corrected_denom"] = float(corrected_denom)
             log_dict["three_plane_momo/network/b1_minus_b2"] = float(b1 - b2)
+            log_dict["three_plane_momo/network/b1_raw_minus_b2_raw_before_reliability_adjustment"] = float(b1_raw - b2_raw)
+            log_dict["three_plane_momo/network/reliability_adjusted_b_gap_minus_raw_b_gap"] = float((b1 - b2) - (b1_raw - b2_raw))
             log_dict["three_plane_momo/network/candidate_C_final_numer"] = float(cand_C_final_numer)  
             log_dict["three_plane_momo/network/candidate_C_numer_term_A_num_fac_times_b_gap"] = float(cand_C_numer_term_A_num_fac_times_b_gap)  
             log_dict["three_plane_momo/network/candidate_C_numer_term_B_mu_times_m1_minus_m2_dot_wt"] = float(cand_C_numer_term_B_mu_times_m1_minus_m2_dot_wt)
             log_dict["three_plane_momo/network/candidate_C_numer_term_C_m1_minus_m2_dot_Pinv_m2"] = float(cand_C_numer_term_C_m1_minus_m2_dot_Pinv_m2)
-            #add
             log_dict["three_plane_momo/network/selected_alpha_unc_from_final_numer_over_corrected_denom"] = float(selected_alpha_unc_from_final_numer_over_corrected_denom)
             log_dict["three_plane_momo/network/alpha1_unc_from_final_numer_over_corrected_denom"] = float(alpha1_unc_from_final_numer_over_corrected_denom)
             log_dict["three_plane_momo/network/|alpha1_unc - alpha1_unc_from_final_numer_over_corrected_denom|"] = float(abs_alpha1_unc_minus_alpha1_unc_from_final_numer_over_corrected_denom)
@@ -878,7 +1013,8 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
                 # m1_for_update = m1
                 ####################################################
                 # Temporary: Potentially consider bias correction to momentum 1.
-                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                # m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                m1_for_update = m1
                 ####################################################
 
                 grad = p.grad.detach()
@@ -966,9 +1102,15 @@ class GenThreeNesterovPlaneMoMo(Optimizer):
             _grp["tp_barf2"] = barf2
             _grp["tp_gamma1"] = gamma1
             _grp["tp_gamma2"] = gamma2
-            #add
             _grp["tp_barf2_gs"] = barf2_gs
             _grp["tp_gamma2_gs"] = gamma2_gs
+            _grp["tp_reliability_ema1"] = reliability_ema1
+            _grp["tp_reliability_ema2"] = reliability_ema2
+            # _grp["tp_prev_b1"] = prev_b1
+            # _grp["tp_prev_b2"] = prev_b2
+            _grp["tp_prev_intercept1"] = prev_intercept1
+            _grp["tp_prev_intercept2"] = prev_intercept2
+            _grp["tp_reliability_initialized"] = reliability_initialized
             _grp["tp_step"] = next_step
 
         return None

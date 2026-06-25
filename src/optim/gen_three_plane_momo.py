@@ -62,7 +62,7 @@ class GenThreePlaneMoMo(Optimizer):
         eps_precond: float = 1e-12,
         decoupled_weight_decay: bool = False,
         alpha_scope: str = "network",
-        fstar: float = 3,
+        fstar: float = 3.0,
     ):
         if lr <= 0:
             raise ValueError("lr must be > 0")
@@ -111,10 +111,16 @@ class GenThreePlaneMoMo(Optimizer):
         super().__init__(params, defaults)
 
         for g in self.param_groups:
-            g.setdefault("tp_barf1", 1.0)
-            g.setdefault("tp_barf2", 1.0)
-            g.setdefault("tp_gamma1", 1.0)
-            g.setdefault("tp_gamma2", 1.0)
+            #modify
+            # g.setdefault("tp_barf1", 1.0)
+            # g.setdefault("tp_barf2", 1.0)
+            # g.setdefault("tp_gamma1", 1.0)
+            # g.setdefault("tp_gamma2", 1.0)
+            #add
+            g.setdefault("tp_barf1", 0.0)
+            g.setdefault("tp_barf2", 0.0)
+            g.setdefault("tp_gamma1", 0.0)
+            g.setdefault("tp_gamma2", 0.0)
             g.setdefault("tp_step", 0)
             g.setdefault("tp_clip_alpha", clip_alpha)
             g.setdefault("tp_use_loss_ema", use_loss_ema)
@@ -299,8 +305,16 @@ class GenThreePlaneMoMo(Optimizer):
                 m2 = state["m2"]  # m_t^{(2)}
 
                 # two EMAs of the gradient
-                m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
-                m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)  # m_t^{(2)} = \Beta_long m_{t-1}^{(2)} + (1 - \Beta_long) g_t
+                #modify
+                # m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
+                # m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)  # m_t^{(2)} = \Beta_long m_{t-1}^{(2)} + (1 - \Beta_long) g_t
+                #add
+                if stored_tp_step == 0:
+                    m1.copy_(grad)
+                    m2.copy_(grad)
+                else:
+                    m1.mul_(beta_s).add_(grad, alpha=1 - beta_s)  # m_t^{(1)} = \Beta_short m_{t-1}^{(1)} + (1 - \Beta_short) g_t
+                    m2.mul_(beta_l).add_(grad, alpha=1 - beta_l)  # m_t^{(2)} = \Beta_long m_{t-1}^{(2)} + (1 - \Beta_long) g_t
 
                 m1_for_update = m1
                 ####################################################
@@ -382,16 +396,36 @@ class GenThreePlaneMoMo(Optimizer):
                     numer_m1_m2_precond_inv_m2 += torch.dot(m1_minus_m2.flatten(), m2.flatten()).item()
 
         # For: lambda_1,unc --- MoMo: by first building b_t^{(1)} and b_t^{(2)} -> build lambda_1_unc.
+        #modify
+        # if use_loss_ema:
+        #     # \bar{l}_{t}^{(1)} = \Beta_1 (\bar{l}_{t}^{(1)}) + (1 - \Beta_1) l_t
+        #     barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
+        #     # \bar{\ell}_{t}^{(2)} = \Beta_2 (\bar{l}_{t}^{(2)}) + (1 - \Beta_2) l_t
+        #     barf2 = beta_l * barf2 + (1 - beta_l) * loss_t
+        #
+        # # \gamma_{t}^{(1)} (fast EMA of <g_t, w_t>)
+        # gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
+        # # \gamma_{t}^{(2)} (slow EMA of <g_t, w_t>)
+        # gamma2 = beta_l * gamma2 + (1 - beta_l) * g_t_dot_w_t
+        #add
         if use_loss_ema:
-            # \bar{l}_{t}^{(1)} = \Beta_1 (\bar{l}_{t}^{(1)}) + (1 - \Beta_1) l_t
-            barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
-            # \bar{\ell}_{t}^{(2)} = \Beta_2 (\bar{l}_{t}^{(2)}) + (1 - \Beta_2) l_t
-            barf2 = beta_l * barf2 + (1 - beta_l) * loss_t
+            if stored_tp_step == 0:
+                barf1 = loss_t
+                barf2 = loss_t
+            else:
+                # \bar{l}_{t}^{(1)} = \Beta_1 (\bar{l}_{t}^{(1)}) + (1 - \Beta_1) l_t
+                barf1 = beta_s * barf1 + (1 - beta_s) * loss_t
+                # \bar{\ell}_{t}^{(2)} = \Beta_2 (\bar{l}_{t}^{(2)}) + (1 - \Beta_2) l_t
+                barf2 = beta_l * barf2 + (1 - beta_l) * loss_t
 
-        # \gamma_{t}^{(1)} (fast EMA of <g_t, w_t>)
-        gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
-        # \gamma_{t}^{(2)} (slow EMA of <g_t, w_t>)
-        gamma2 = beta_l * gamma2 + (1 - beta_l) * g_t_dot_w_t
+        if stored_tp_step == 0:
+            gamma1 = g_t_dot_w_t
+            gamma2 = g_t_dot_w_t
+        else:
+            # \gamma_{t}^{(1)} (fast EMA of <g_t, w_t>)
+            gamma1 = beta_s * gamma1 + (1 - beta_s) * g_t_dot_w_t
+            # \gamma_{t}^{(2)} (slow EMA of <g_t, w_t>)
+            gamma2 = beta_l * gamma2 + (1 - beta_l) * g_t_dot_w_t
 
         # For: lambda_1,unc
         if use_loss_ema:
@@ -874,10 +908,10 @@ class GenThreePlaneMoMo(Optimizer):
                 m1 = self.state[p]["m1"]
                 m2 = self.state[p]["m2"]
 
-                # m1_for_update = m1
+                m1_for_update = m1
                 ####################################################
                 # Temporary: Potentially consider bias correction to momentum 1.
-                m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
+                # m1_for_update = m1 / max(1.0 - beta_s ** tp_step, eps)
                 ####################################################
 
                 # projected dual mixture direction:
